@@ -20,7 +20,7 @@ Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-se
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/YOUR-USERNAME/ComfyUI-easygoing-nodes.git
+git clone https://github.com/easygoing0114/ComfyUI-easygoing-nodes.git
 ```
 2. Restart ComfyUI. The new nodes should now appear in the node search.
 
