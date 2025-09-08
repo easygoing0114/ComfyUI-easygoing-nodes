@@ -9,16 +9,27 @@ Enhanced Text Encoder modules, acd Custom nodes for [ComfyUI](https://github.com
   - **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
   - **HiDream Text Encoder**: Advanced encoder support with CPU optimization for better memory management
 
-- **CLIP Loaders**  
+- **CLIP Loaders**
+
+<img width="400" height="189" alt="QuadrupleCLIPLoaderSetDevice node" src="Images/QuadrupleCLIPLoaderSetDevice node.png">
+<img width="400" height="170" alt="TripleCLIPLoaderSetDevice node" src="Images/TripleCLIPLoaderSetDevice node.png">
+<img width="400" height="155" alt="CLIPVisionLoaderSetDevice node" src="Images/CLIPVisionLoaderSetDevice node.png">
+
   - Quadruple CLIP Loader (Set Device)  
   - Triple CLIP Loader (Set Device)  
   - CLIP Vision Loader (Set Device)
 
-- **HDR Effects with LAB Adjust**  
+- **HDR Effects with LAB Adjust**
+
+<img width="320" height="314" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
+
   Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.  
   💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
 
-- **Save Image With Prompt**  
+- **Save Image With Prompt**
+
+<img width="240" height="356" alt="SaveImageWithPrompt node" src="Images/SaveImageWithPrompt node.png">
+
   Save images with positive/negative prompts and captions embedded in PNG metadata.
 
 ## 🔥 Installation
