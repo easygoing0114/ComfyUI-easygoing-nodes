@@ -6,7 +6,7 @@ Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-se
 
 - **🔧 Enhanced Text Encoder Modules**  
   Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced versions that include:
-  - **CLIP-G Improvements**: Enhanced attention mask support and better tokenization
+  - **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
   - **HiDream Text Encoder**: Advanced encoder support with CPU optimization for better memory management
 
 - **CLIP Loaders**  
