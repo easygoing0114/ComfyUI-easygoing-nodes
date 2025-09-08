@@ -57,11 +57,11 @@ This custom node package includes enhanced versions of core ComfyUI modules:
 
 | Node Name                        | Display Name                     | Category                  |
 |----------------------------------|----------------------------------|---------------------------|
-| `HDREffectsLabAdjust`            | HDR Effects with LAB Adjusts     | SuperBeastsAI/Image       |
-| `SaveImageWithPrompt`            | Save Image With Prompt           | image                     |
 | `QuadrupleCLIPLoaderSetDevice`   | Quadruple CLIP Loader (Set Device) | advanced/loaders        |
 | `TripleCLIPLoaderSetDevice`      | Triple CLIP Loader (Set Device)    | advanced/loaders        |
 | `CLIPVisionLoaderSetDevice`      | Load CLIP Vision (Set Device)      | advanced/loaders        |
+| `HDREffectsLabAdjust`            | HDR Effects with LAB Adjusts     | SuperBeastsAI/Image       |
+| `SaveImageWithPrompt`            | Save Image With Prompt           | image                     |
 
 ## 🔍 Verification
 
