@@ -80,4 +80,4 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## 🙏 Credits
 - HDR Effects based on [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts)
-- Enhanced CLIP modules provide improved functionality over standard ComfyUI implementations
+- Enhanced SDXL CLIP module (`sdxl_clip.py`) by [Shiba-2-shiba](https://github.com/Shiba-2-shiba)
