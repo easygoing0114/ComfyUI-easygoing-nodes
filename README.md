@@ -1,4 +1,4 @@
-<img width="1410" height="1000" alt="thumbnail image" src="Images/thumbnail image.png">
+<img width="705" height="500" alt="thumbnail image" src="Images/thumbnail image.png">
 
 # ComfyUI-easygoing-nodes
 
@@ -25,6 +25,16 @@ Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com
 - **HDR Effects with LAB Adjust**
 
 <img width="320" height="314" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
+
+### Example
+Left: HDR only | Right: a/b adjust 
+
+<table>
+  <tr>
+    <td><img width="353" height="250" alt="thumbnail image" src="Images/no ab_adjust"></td>
+    <td><img width="353" height="250" alt="thumbnail image" src="Images/thumbnail image.png"></td>
+  </tr>
+</table>
 
   Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.  
   💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
