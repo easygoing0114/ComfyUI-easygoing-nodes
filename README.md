@@ -31,7 +31,7 @@ Left: HDR only | Right: a/b adjust
 
 <table>
   <tr>
-    <td><img width="353" height="250" alt="thumbnail image" src="Images/no ab_adjust"></td>
+    <td><img width="353" height="250" alt="thumbnail image" src="Images/no ab_adjust.png"></td>
     <td><img width="353" height="250" alt="thumbnail image" src="Images/thumbnail image.png"></td>
   </tr>
 </table>
