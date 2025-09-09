@@ -95,13 +95,13 @@ class HDREffectsLabAdjust:
         return {
             'required': {
                 'image': ('IMAGE',),
-                'hdr_intensity': ('FLOAT', {'default': 1, 'min': 0.0, 'max': 5.0, 'step': 0.01}),
+                'hdr_intensity': ('FLOAT', {'default': 0.8, 'min': 0.0, 'max': 5.0, 'step': 0.01}),
                 'shadow_intensity': ('FLOAT', {'default': 0.8, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'highlight_intensity': ('FLOAT', {'default': 0.1, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'gamma_intensity': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'gamma_intensity': ('FLOAT', {'default': 0.2, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'ab_strength': ('FLOAT', {'default': 1.0, 'min': 0.5, 'max': 5.0, 'step': 0.1}),
-                'a_adjustment': ('FLOAT', {'default': 0.03, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
-                'b_adjustment': ('FLOAT', {'default': -0.05, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
+                'a_adjustment': ('FLOAT', {'default': 0.15, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
+                'b_adjustment': ('FLOAT', {'default': -0.3, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
                 'contrast': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'enhance_color': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
             }
@@ -113,8 +113,8 @@ class HDREffectsLabAdjust:
     CATEGORY = 'SuperBeastsAI/Image'
 
     @apply_to_batch
-    def apply_hdr2(self, image, hdr_intensity=1, shadow_intensity=0.8, highlight_intensity=0.1, gamma_intensity=0,
-                   ab_strength=1.0, a_adjustment=0.0, b_adjustment=0.0,
+    def apply_hdr2(self, image, hdr_intensity=0.8, shadow_intensity=0.8, highlight_intensity=0.1, gamma_intensity=0.2,
+                   ab_strength=1.0, a_adjustment=0.15, b_adjustment=-0.3,
                    contrast=0, enhance_color=0):
         img = tensor2pil(image)
         
