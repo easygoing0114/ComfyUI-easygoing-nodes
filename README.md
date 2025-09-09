@@ -1,6 +1,6 @@
 # ComfyUI-easygoing-nodes
 
-Enhanced Text Encoder modules, acd Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-select CLIP loaders, providing HDR effects, image saving with prompt metadata.
+Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-select CLIP loaders, providing HDR effects, image saving with prompt metadata.
 
 ## ✨ Features
 
