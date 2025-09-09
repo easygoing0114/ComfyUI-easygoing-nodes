@@ -95,10 +95,10 @@ class HDREffectsLabAdjust:
         return {
             'required': {
                 'image': ('IMAGE',),
-                'hdr_intensity': ('FLOAT', {'default': 0.8, 'min': 0.0, 'max': 5.0, 'step': 0.01}),
-                'shadow_intensity': ('FLOAT', {'default': 0.8, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'highlight_intensity': ('FLOAT', {'default': 0.1, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'gamma_intensity': ('FLOAT', {'default': 0.2, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'hdr_intensity': ('FLOAT', {'default': 0.75, 'min': 0.0, 'max': 5.0, 'step': 0.01}),
+                'shadow_intensity': ('FLOAT', {'default': 0.75, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'highlight_intensity': ('FLOAT', {'default': 0.25, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'gamma_intensity': ('FLOAT', {'default': 0.1, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'ab_strength': ('FLOAT', {'default': 1.0, 'min': 0.5, 'max': 5.0, 'step': 0.1}),
                 'a_adjustment': ('FLOAT', {'default': 0.15, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
                 'b_adjustment': ('FLOAT', {'default': -0.3, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
@@ -113,7 +113,7 @@ class HDREffectsLabAdjust:
     CATEGORY = 'SuperBeastsAI/Image'
 
     @apply_to_batch
-    def apply_hdr2(self, image, hdr_intensity=0.8, shadow_intensity=0.8, highlight_intensity=0.1, gamma_intensity=0.2,
+    def apply_hdr2(self, image, hdr_intensity=0.75, shadow_intensity=0.75, highlight_intensity=0.25, gamma_intensity=0.1,
                    ab_strength=1.0, a_adjustment=0.15, b_adjustment=-0.3,
                    contrast=0, enhance_color=0):
         img = tensor2pil(image)
