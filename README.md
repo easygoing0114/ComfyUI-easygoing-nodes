@@ -1,3 +1,5 @@
+<img width="1410" height="1000" alt="thumbnail image" src="Images/thumbnail image.png">
+
 # ComfyUI-easygoing-nodes
 
 Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-select CLIP loaders, providing HDR effects, image saving with prompt metadata.
