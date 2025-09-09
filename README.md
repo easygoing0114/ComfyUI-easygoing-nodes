@@ -27,7 +27,6 @@ Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com
 <img width="320" height="314" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
 
 ### Example
-Left: HDR only | Right: a/b adjust 
 
 <table>
   <tr>
@@ -35,6 +34,8 @@ Left: HDR only | Right: a/b adjust
     <td><img width="353" height="250" alt="thumbnail image" src="Images/thumbnail image.png"></td>
   </tr>
 </table>
+
+Left: HDR only | Right: a/b adjust 
 
   Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.  
   💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
