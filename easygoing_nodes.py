@@ -51,15 +51,44 @@ def apply_gamma_correction(lum_array, gamma):
     adjusted = 255 * ((lum_array / 255) ** gamma_corrected)
     return np.clip(adjusted, 0, 255).astype(np.uint8)
 
+def adjust_ab_exponential(ab_array, adjustment_intensity, center=128, max_adjustment=2.0):
+    """
+    AB色相チャンネルに指数関数的調整を適用
+    
+    Args:
+        ab_array: A または B チャンネルの配列 (0-255)
+        adjustment_intensity: 調整強度 (-1.0 to 1.0)
+        center: 中性点（通常128）
+        max_adjustment: 最大調整係数
+    """
+    if adjustment_intensity == 0:
+        return ab_array
+    
+    # 0-1範囲に正規化し、中性点を0基準にシフト
+    normalized = (ab_array.astype(np.float32) - center) / 128.0
+    
+    if adjustment_intensity > 0:
+        # 正の調整: 色を強調（外側に拡張）
+        gamma = 1 / (1 + adjustment_intensity * max_adjustment)
+        adjusted = np.sign(normalized) * (np.abs(normalized) ** gamma)
+    else:
+        # 負の調整: 色を抑制（中性点に収束）
+        gamma = 1 + (-adjustment_intensity) * max_adjustment
+        adjusted = np.sign(normalized) * (np.abs(normalized) ** gamma)
+    
+    # 元の範囲に戻す
+    result = adjusted * 128.0 + center
+    return np.clip(result, 0, 255).astype(np.uint8)
+
 def apply_to_batch(func):
     def wrapper(self, image, *args, **kwargs):
         images = [func(self, img, *args, **kwargs) for img in image]
         return (torch.cat(images, dim=0),)
     return wrapper
 
-# Custom node: HDREffectsLabAdjusts
+# Custom node: HDREffectsLabAdjusts with Exponential AB Processing
 class HDREffectsLabAdjust:
-    DESCRIPTION = "Apply HDR tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB A/B channel adjustments."
+    DESCRIPTION = "Apply HDR tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and exponential LAB A/B channel adjustments. Use ab_strength to control color adjustment intensity (0.5=gentle, 2.0=standard, 5.0=dramatic)."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -70,6 +99,7 @@ class HDREffectsLabAdjust:
                 'shadow_intensity': ('FLOAT', {'default': 0.8, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'highlight_intensity': ('FLOAT', {'default': 0.1, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'gamma_intensity': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'ab_strength': ('FLOAT', {'default': 1.0, 'min': 0.5, 'max': 5.0, 'step': 0.1}),
                 'a_adjustment': ('FLOAT', {'default': 0.03, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
                 'b_adjustment': ('FLOAT', {'default': -0.05, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
                 'contrast': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
@@ -83,8 +113,9 @@ class HDREffectsLabAdjust:
     CATEGORY = 'SuperBeastsAI/Image'
 
     @apply_to_batch
-    def apply_hdr2(self, image, hdr_intensity=0.5, shadow_intensity=0.25, highlight_intensity=0.75, 
-                   gamma_intensity=0.25, contrast=0.1, enhance_color=0.25, a_adjustment=0.0, b_adjustment=0.0):
+    def apply_hdr2(self, image, hdr_intensity=1, shadow_intensity=0.8, highlight_intensity=0.1, gamma_intensity=0,
+                   ab_strength=1.0, a_adjustment=0.0, b_adjustment=0.0,
+                   contrast=0, enhance_color=0):
         img = tensor2pil(image)
         
         # Convert to LAB
@@ -93,21 +124,19 @@ class HDREffectsLabAdjust:
         
         # Convert to NumPy arrays
         lum_array = np.array(luminance, dtype=np.float32)
-        a_array = np.array(a, dtype=np.float32)
-        b_array = np.array(b, dtype=np.float32)
+        a_array = np.array(a, dtype=np.uint8)
+        b_array = np.array(b, dtype=np.uint8)
 
-        # Adjust A and B channels
+        # Apply exponential adjustments to A and B channels
         if a_adjustment != 0.0:
-            a_array = a_array * (1.0 + a_adjustment)
-            a_array = np.clip(a_array, 0, 255).astype(np.uint8)
+            a_array = adjust_ab_exponential(a_array, a_adjustment, max_adjustment=ab_strength)
         if b_adjustment != 0.0:
-            b_array = b_array * (1.0 + b_adjustment)
-            b_array = np.clip(b_array, 0, 255).astype(np.uint8)
+            b_array = adjust_ab_exponential(b_array, b_adjustment, max_adjustment=ab_strength)
 
         a_adjusted = Image.fromarray(a_array)
         b_adjusted = Image.fromarray(b_array)
 
-        # Apply HDR adjustments
+        # Apply HDR adjustments to luminance
         shadows_adjusted = adjust_shadows_non_linear(luminance, shadow_intensity)
         highlights_adjusted = adjust_highlights_non_linear(luminance, highlight_intensity)
         merged_adjustments = merge_adjustments_with_blend_modes(lum_array, shadows_adjusted, highlights_adjusted, 
