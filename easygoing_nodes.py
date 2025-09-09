@@ -160,8 +160,8 @@ class SaveImageWithPrompt:
 
     def save_images(self, images, filename_prefix="ComfyUI", positive_prompt="", negative_prompt="", caption="", prompt=None, extra_pnginfo=None):
         # Truncate filename_prefix to 200 characters if it exceeds that length
-        if len(filename_prefix) > 200:
-            filename_prefix = filename_prefix[:200]
+        if len(filename_prefix) > 180:
+            filename_prefix = filename_prefix[:180]
             
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])
