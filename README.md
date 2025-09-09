@@ -48,33 +48,6 @@ git clone https://github.com/easygoing0114/ComfyUI-easygoing-nodes.git
 
 3. Restart ComfyUI. The new nodes should now appear in the node search.
 
-## 🔄 Module Enhancement Details
-
-This custom node package includes enhanced versions of core ComfyUI modules:
-
-### **Enhanced SDXL CLIP (`sdxl_clip.py`)**
-- ✅ **Improved Attention Masks**: Better support for attention masking mechanisms
-- ✅ **Enhanced Tokenization**: Optimized tokenizer with improved padding strategies
-
-### **Enhanced HiDream Text Encoder (`hidream.py`)**
-- ✅ **CPU Optimization**: Forced CPU processing for better memory management
-
-### **Safety & Compatibility**
-- ⚡ **Non-Destructive**: Original ComfyUI files are never modified
-- 🔄 **Reversible**: Simply remove the custom node to revert to original functionality
-- 🛡️ **Safe**: Changes exist only in memory during ComfyUI runtime
-- 📦 **Isolated**: No impact on other custom nodes or ComfyUI core functionality
-
-## 📂 Nodes Overview
-
-| Node Name                        | Display Name                     | Category                  |
-|----------------------------------|----------------------------------|---------------------------|
-| `QuadrupleCLIPLoaderSetDevice`   | Quadruple CLIP Loader (Set Device) | advanced/loaders        |
-| `TripleCLIPLoaderSetDevice`      | Triple CLIP Loader (Set Device)    | advanced/loaders        |
-| `CLIPVisionLoaderSetDevice`      | Load CLIP Vision (Set Device)      | advanced/loaders        |
-| `HDREffectsLabAdjust`            | HDR Effects with LAB Adjusts     | SuperBeastsAI/Image       |
-| `SaveImageWithPrompt`            | Save Image With Prompt           | image                     |
-
 ## 🔍 Verification
 
 When ComfyUI starts with this custom node, you should see messages like:
