@@ -9,16 +9,28 @@ Enhanced Text Encoder modules, acd Custom nodes for [ComfyUI](https://github.com
   - **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
   - **HiDream Text Encoder**: Advanced encoder support with CPU optimization for better memory management
 
-- **CLIP Loaders**  
-  - Quadruple CLIP Loader (Set Device)  
+- **CLIP Loaders**
+  - Quadruple CLIP Loader (Set Device)
   - Triple CLIP Loader (Set Device)  
-  - CLIP Vision Loader (Set Device)
+  - Load CLIP Vision (Set Device)
 
-- **HDR Effects with LAB Adjust**  
+<img width="400" height="189" alt="QuadrupleCLIPLoaderSetDevice node" src="Images/QuadrupleCLIPLoaderSetDevice node.png">
+<img width="400" height="170" alt="TripleCLIPLoaderSetDevice node" src="Images/TripleCLIPLoaderSetDevice node.png">
+<img width="400" height="155" alt="CLIPVisionLoaderSetDevice node" src="Images/CLIPVisionLoaderSetDevice node.png">
+
+  Adds an option to load the text encoder into RAM and process it on the CPU (same implementation as the default Load CLIP and DualCLIPLoader).
+
+- **HDR Effects with LAB Adjust**
+
+<img width="320" height="314" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
+
   Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.  
   💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
 
-- **Save Image With Prompt**  
+- **Save Image With Prompt**
+
+<img width="240" height="356" alt="SaveImageWithPrompt node" src="Images/SaveImageWithPrompt node.png">
+
   Save images with positive/negative prompts and captions embedded in PNG metadata.
 
 ## 🔥 Installation
@@ -35,33 +47,6 @@ git clone https://github.com/easygoing0114/ComfyUI-easygoing-nodes.git
    - `hidream.py` - Enhanced HiDream text encoder implementation
 
 3. Restart ComfyUI. The new nodes should now appear in the node search.
-
-## 🔄 Module Enhancement Details
-
-This custom node package includes enhanced versions of core ComfyUI modules:
-
-### **Enhanced SDXL CLIP (`sdxl_clip.py`)**
-- ✅ **Improved Attention Masks**: Better support for attention masking mechanisms
-- ✅ **Enhanced Tokenization**: Optimized tokenizer with improved padding strategies
-
-### **Enhanced HiDream Text Encoder (`hidream.py`)**
-- ✅ **CPU Optimization**: Forced CPU processing for better memory management
-
-### **Safety & Compatibility**
-- ⚡ **Non-Destructive**: Original ComfyUI files are never modified
-- 🔄 **Reversible**: Simply remove the custom node to revert to original functionality
-- 🛡️ **Safe**: Changes exist only in memory during ComfyUI runtime
-- 📦 **Isolated**: No impact on other custom nodes or ComfyUI core functionality
-
-## 📂 Nodes Overview
-
-| Node Name                        | Display Name                     | Category                  |
-|----------------------------------|----------------------------------|---------------------------|
-| `QuadrupleCLIPLoaderSetDevice`   | Quadruple CLIP Loader (Set Device) | advanced/loaders        |
-| `TripleCLIPLoaderSetDevice`      | Triple CLIP Loader (Set Device)    | advanced/loaders        |
-| `CLIPVisionLoaderSetDevice`      | Load CLIP Vision (Set Device)      | advanced/loaders        |
-| `HDREffectsLabAdjust`            | HDR Effects with LAB Adjusts     | SuperBeastsAI/Image       |
-| `SaveImageWithPrompt`            | Save Image With Prompt           | image                     |
 
 ## 🔍 Verification
 
