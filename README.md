@@ -6,15 +6,17 @@ Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com
 
 ## ✨ Features
 
-- **🔧 Enhanced Text Encoder Modules**  
-  Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced versions that include:
-  - **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
-  - **HiDream Text Encoder**: Advanced encoder support with CPU optimization for better memory management
+### 🔧 Enhanced Text Encoder Modules
 
-- **CLIP Loaders**
-  - Quadruple CLIP Loader (Set Device)
-  - Triple CLIP Loader (Set Device)  
-  - Load CLIP Vision (Set Device)
+Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced versions that include:
+
+- **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
+- **HiDream Text Encoder**: Advanced encoder support with CPU optimization for better memory management
+
+### CLIP Loaders
+- Quadruple CLIP Loader (Set Device)
+- Triple CLIP Loader (Set Device)  
+- Load CLIP Vision (Set Device)
 
 <img width="400" height="189" alt="QuadrupleCLIPLoaderSetDevice node" src="Images/QuadrupleCLIPLoaderSetDevice node.png">
 <img width="400" height="170" alt="TripleCLIPLoaderSetDevice node" src="Images/TripleCLIPLoaderSetDevice node.png">
@@ -22,11 +24,12 @@ Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com
 
   Adds an option to load the text encoder into RAM and process it on the CPU (same implementation as the default Load CLIP and DualCLIPLoader).
 
-- **HDR Effects with LAB Adjust**
+### HDR Effects with LAB Adjust
 
 <img width="320" height="314" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
 
-### Example
+**Example**
+- Left: HDR only | Right: a/b adjust 
 
 <table>
   <tr>
@@ -35,12 +38,10 @@ Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com
   </tr>
 </table>
 
-Left: HDR only | Right: a/b adjust 
-
   Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.  
   💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
 
-- **Save Image With Prompt**
+### **Save Image With Prompt**
 
 <img width="240" height="356" alt="SaveImageWithPrompt node" src="Images/SaveImageWithPrompt node.png">
 
