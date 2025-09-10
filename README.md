@@ -1,4 +1,6 @@
+<div align="center">
 <img width="705" height="500" alt="thumbnail image" src="Images/thumbnail image.png">
+</div>div
 
 # ComfyUI-easygoing-nodes
 
