@@ -26,7 +26,7 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced ver
 
 ### HDR Effects with LAB Adjust
 
-<img width="320" height="314" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
+<img width="320" height="374" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
 
 **Example**
 - Left: HDR only | Right: a/b adjust 
