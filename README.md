@@ -31,11 +31,11 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced ver
 <img width="320" height="374" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
 
 **Example**
-- Left: HDR only | Right: a/b adjust 
+- Left: Original | Right: HDR Processing
 
 <table>
   <tr>
-    <td><img width="353" height="250" alt="thumbnail image" src="Images/no ab_adjust.png"></td>
+    <td><img width="353" height="250" alt="thumbnail image" src="Images/before HDR.png"></td>
     <td><img width="353" height="250" alt="thumbnail image" src="Images/thumbnail image.png"></td>
   </tr>
 </table>
