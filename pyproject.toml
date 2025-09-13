@@ -6,7 +6,6 @@ license = {file = "LICENSE"}
 
 [project.urls]
 Repository = "https://github.com/easygoing0114/ComfyUI-easygoing-nodes"
-#  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]
 publisher_id = "easygoing0114"
