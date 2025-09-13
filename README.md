@@ -16,12 +16,17 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced ver
 - **HiDream Text Encoder**: Advanced encoder support with CPU optimization for better memory management
 
 ### CLIP Loaders
+
 - Quadruple CLIP Loader (Set Device)
-- Triple CLIP Loader (Set Device)  
-- Load CLIP Vision (Set Device)
 
 <img width="400" height="189" alt="QuadrupleCLIPLoaderSetDevice node" src="Images/QuadrupleCLIPLoaderSetDevice node.png">
+
+- Triple CLIP Loader (Set Device) 
+
 <img width="400" height="170" alt="TripleCLIPLoaderSetDevice node" src="Images/TripleCLIPLoaderSetDevice node.png">
+
+- Load CLIP Vision (Set Device)
+
 <img width="400" height="155" alt="CLIPVisionLoaderSetDevice node" src="Images/CLIPVisionLoaderSetDevice node.png">
 
   Adds an option to load the text encoder into RAM and process it on the CPU (same implementation as the default Load CLIP and DualCLIPLoader).
