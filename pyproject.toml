@@ -1,11 +1,14 @@
 [project]
 name = "comfyui-easygoing-nodes"
+description = "Fix Text Encorder and Custom ComfyUI nodes by easygoing0114"
 version = "1.0.0"
-description = "Custom ComfyUI nodes by easygoing0114"
-readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/easygoing0114/ComfyUI-easygoing-nodes"
+#  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]
 publisher_id = "easygoing0114"
 display_name = "Easygoing Nodes"
+Icon = ""
