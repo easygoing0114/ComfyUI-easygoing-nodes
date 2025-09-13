@@ -1,0 +1,11 @@
+[project]
+name = "comfyui-easygoing-nodes"
+version = "1.0.0"
+description = "Custom ComfyUI nodes by easygoing0114"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.comfy]
+publisher_id = "easygoing0114" 
+display_name = "Easygoing Nodes" 
