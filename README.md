@@ -41,7 +41,7 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced ver
 <table>
   <tr>
     <td><img width="353" height="250" alt="thumbnail image" src="Images/before HDR.png"></td>
-    <td><img width="353" height="250" alt="thumbnail image" src="Images/thumbnail image.png"></td>
+    <td><img width="353" height="250" alt="thumbnail image" src="Images/after HDR.png"></td>
   </tr>
 </table>
 
