@@ -177,6 +177,7 @@ class HDREffectsLabAdjust:
         
         return pil2tensor(color_adjusted)
 
+
 class SaveImageWithPrompt:
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
@@ -193,6 +194,7 @@ class SaveImageWithPrompt:
                 "positive_prompt": ("STRING", {"default": "", "tooltip": "The positive prompt to embed in the image metadata."}),
                 "negative_prompt": ("STRING", {"default": "", "tooltip": "The negative prompt to embed in the image metadata."}),
                 "caption": ("STRING", {"default": "", "tooltip": "The caption to embed in the image metadata."}),
+                "numbers": ("BOOLEAN", {"default": True, "tooltip": "Add sequential numbers to the filename."}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -206,7 +208,7 @@ class SaveImageWithPrompt:
     CATEGORY = "image"
     DESCRIPTION = "Saves the input images to your ComfyUI output directory with positive and negative prompts and caption in metadata."
 
-    def save_images(self, images, filename_prefix="ComfyUI", positive_prompt="", negative_prompt="", caption="", prompt=None, extra_pnginfo=None):
+    def save_images(self, images, filename_prefix="ComfyUI", positive_prompt="", negative_prompt="", caption="", numbers=True, prompt=None, extra_pnginfo=None):
         # Truncate filename_prefix to 200 characters if it exceeds that length
         if len(filename_prefix) > 180:
             filename_prefix = filename_prefix[:180]
@@ -239,7 +241,13 @@ class SaveImageWithPrompt:
                         metadata.add_text(x, json.dumps(extra_pnginfo[x]))
             
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
-            file = f"{filename_with_batch_num}.png"
+            
+            # numbersトグルによってファイル名の形式を変更
+            if numbers:
+                file = f"{filename_with_batch_num}_{counter:05}_.png"
+            else:
+                file = f"{filename_with_batch_num}.png"
+            
             img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=self.compress_level)
             results.append({
                 "filename": file,
