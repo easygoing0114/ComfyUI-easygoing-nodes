@@ -4,13 +4,13 @@
 
 # ComfyUI-easygoing-nodes
 
-Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-select CLIP loaders, providing HDR effects, image saving with prompt metadata.
+Experimental Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-select CLIP loaders, providing HDR effects, image saving with prompt metadata.
 
 ## ✨ Features
 
-### 🔧 Enhanced Text Encoder Modules
+### 🔧 Experimental Text Encoder Modules
 
-Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced versions that include:
+Automatically replaces ComfyUI's built-in Text Encoder modules with Experimental versions that include:
 
 - **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
 - **HiDream Text Encoder**: Advanced encoder support with CPU optimization for better memory management
@@ -45,7 +45,8 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced ver
   </tr>
 </table>
 
-  Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.  
+  Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.
+    
   💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
 
 ### **Save Image With Prompt**
