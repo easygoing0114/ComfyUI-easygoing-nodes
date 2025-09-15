@@ -61,7 +61,7 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with Experimental
 
 Thanks to [**da2ei-ai**](https://github.com/da2el-ai/), who develops [**D2-node-ComfyUI**](https://github.com/da2el-ai/D2-nodes-ComfyUI), the **D2 Load Image** node now supports loading **positive_prompt** and **negative_prompt** saved using the **Save Image With Prompt** node.  
 
-
+<img width="600" height="406" alt="D2 load image node" src="Images/D2 load image.png.png">
 
 ## 🔥 Installation
 1. Clone this repository into your ComfyUI `custom_nodes` folder:
