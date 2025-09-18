@@ -4,7 +4,7 @@
 
 # ComfyUI-easygoing-nodes
 
-**Guide (External Site):** [English](https://www.ai-image-journey.com/2025/09/comfyui-easygoing-nodes.html) | [Japanese](https://note.com/ai_image_journey/n/n5bb33311b866)
+**Detail Guide (External Site):** [English](https://www.ai-image-journey.com/2025/09/comfyui-easygoing-nodes.html) | [Japanese](https://note.com/ai_image_journey/n/n5bb33311b866)
 
 Experimental Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-select CLIP loaders, providing HDR effects, image saving with prompt metadata.
 
@@ -37,6 +37,21 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with Experimental
 
 <img width="320" height="374" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
 
+- **Brightness Adjustments**  
+  - hdr_intensity: Strength of brightness adjustment  
+  - shadow_intensity: Darkens shadow areas  
+  - highlight_intensity: Brightens highlight areas  
+  - gamma_intensity: Darkens the overall image  
+
+- **Color Adjustments**  
+  - ab_strength: Strength of color adjustment  
+  - a_adjustment: Adjusts green ↔ red balance  
+  - b_adjustment: Adjusts blue ↔ yellow balance  
+
+- **Final Touches**  
+  - contrast: Adjusts contrast  
+  - enhance_color: Adjusts saturation (color intensity)  
+
 **Example**
 - **Left: Original | Right: HDR Processing**
 
@@ -54,6 +69,12 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with Experimental
 ### **Save Image With Prompt**
 
 <img width="240" height="356" alt="SaveImageWithPrompt node" src="Images/SaveImageWithPrompt node.png">
+
+- **filename_prefix**: File name  
+- **positive_prompt**  
+- **negative_prompt**  
+- **caption**: Image caption  
+- **numbers**: Include sequential numbers at the end of the file name  
 
   Save images with positive/negative prompts and captions embedded in PNG metadata.
 
