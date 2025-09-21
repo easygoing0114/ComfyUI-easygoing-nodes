@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-easygoing-nodes"
-description = "Fix Text Encorder and Custom ComfyUI nodes by easygoing0114"
-version = "1.0.1"
+description = "Experimental Text Encorder module and Custom ComfyUI nodes by easygoing0114"
+version = "1.0.2"
 license = { file = "LICENSE.txt" }
 dependencies  = [] # Filled in from requirements.txt
 

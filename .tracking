@@ -1,0 +1,18 @@
+.github/workflows/publish.yml
+.gitignore
+Images/CLIPVisionLoaderSetDevice node.png
+Images/HDREffectsLabAdjust node.png
+Images/QuadrupleCLIPLoaderSetDevice node.png
+Images/SaveImageWithPrompt node.png
+Images/TripleCLIPLoaderSetDevice node.png
+Images/after HDR.png
+Images/before HDR.png
+Images/thumbnail image.png
+LICENSE
+README.md
+__init__.py
+easygoing_nodes.py
+modified_modules/__init__.py
+modified_modules/hidream.py
+modified_modules/sdxl_clip.py
+pyproject.toml
