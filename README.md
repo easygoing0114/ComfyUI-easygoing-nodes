@@ -4,18 +4,18 @@
 
 # ComfyUI-easygoing-nodes
 
-**Detail Guide (External Site):** [English](https://www.ai-image-journey.com/2025/09/comfyui-easygoing-nodes.html) | [Japanese](https://note.com/ai_image_journey/n/n5bb33311b866)
-
-Experimental Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-select CLIP loaders, providing HDR effects, image saving with prompt metadata.
+Enhanced Text Encoder modules, add Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), device-select CLIP loaders, providing HDR effects, image saving with prompt metadata.
 
 ## ✨ Features
 
-### 🔧 Experimental Text Encoder Modules
+### 🔧 Enhanced Text Encoder Modules
 
-Automatically replaces ComfyUI's built-in Text Encoder modules with Experimental versions that include:
+Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced versions that include:
 
 - **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
 - **HiDream Text Encoder**: Advanced encoder support with CPU optimization for better memory management
+
+These replacements can be toggled on/off individually from ComfyUI's settings.
 
 ### CLIP Loaders
 
@@ -37,21 +37,6 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with Experimental
 
 <img width="320" height="374" alt="HDREffectsLabAdjust node" src="Images/HDREffectsLabAdjust node.png">
 
-- **Brightness Adjustments**  
-  - hdr_intensity: Strength of brightness adjustment  
-  - shadow_intensity: Darkens shadow areas  
-  - highlight_intensity: Brightens highlight areas  
-  - gamma_intensity: Darkens the overall image  
-
-- **Color Adjustments**  
-  - ab_strength: Strength of color adjustment  
-  - a_adjustment: Adjusts green ↔ red balance  
-  - b_adjustment: Adjusts blue ↔ yellow balance  
-
-- **Final Touches**  
-  - contrast: Adjusts contrast  
-  - enhance_color: Adjusts saturation (color intensity)  
-
 **Example**
 - **Left: Original | Right: HDR Processing**
 
@@ -62,27 +47,14 @@ Automatically replaces ComfyUI's built-in Text Encoder modules with Experimental
   </tr>
 </table>
 
-  Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.
-    
+  Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.  
   💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
 
 ### **Save Image With Prompt**
 
 <img width="240" height="356" alt="SaveImageWithPrompt node" src="Images/SaveImageWithPrompt node.png">
 
-- **filename_prefix**: File name  
-- **positive_prompt**  
-- **negative_prompt**  
-- **caption**: Image caption  
-- **numbers**: Include sequential numbers at the end of the file name  
-
   Save images with positive/negative prompts and captions embedded in PNG metadata.
-
-### Loading Prompts with D2 Load Image 
-
-Thanks to [**da2ei-ai**](https://github.com/da2el-ai/), who develops [**D2-node-ComfyUI**](https://github.com/da2el-ai/D2-nodes-ComfyUI), the **D2 Load Image** node now supports loading **positive_prompt** and **negative_prompt** saved using the **Save Image With Prompt** node.  
-
-<img width="600" height="406" alt="D2 load image node" src="Images/D2 load image.png">
 
 ## 🔥 Installation
 1. Clone this repository into your ComfyUI `custom_nodes` folder:
@@ -104,16 +76,24 @@ git clone https://github.com/easygoing0114/ComfyUI-easygoing-nodes.git
 When ComfyUI starts with this custom node, you should see messages like:
 ```
 Loading ComfyUI-easygoing-nodes with module replacements...
-✓ Successfully replaced comfy.sdxl_clip with custom implementation
-✓ Successfully replaced comfy.text_encoders.hidream with custom implementation
+EasygoingNodes settings loaded: {'enable_sdxl_clip': True, 'enable_hidream': True}
+✓ Applied module replacements: sdxl_clip, hidream
 Module replacement process completed!
 ```
 
 If you don't see these messages, check that the `modified_modules/` directory contains the necessary files.
 
 ## ⚖️ License
+
 This project is licensed under the [MIT License](LICENSE).
 
 ## 🙏 Credits
+
 - Enhanced SDXL CLIP module (`sdxl_clip.py`) by [Shiba-2-shiba](https://github.com/Shiba-2-shiba)
 - HDR Effects based on [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts)
+
+## Update History
+
+### 2025.9.21
+
+Added toggle functionality for Experimental Text Encoder Modules in ComfyUI settings.
