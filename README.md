@@ -75,7 +75,6 @@ git clone https://github.com/easygoing0114/ComfyUI-easygoing-nodes.git
 
 When ComfyUI starts with this custom node, you should see messages like:
 ```
-Loading ComfyUI-easygoing-nodes with module replacements...
 EasygoingNodes settings loaded: {'enable_sdxl_clip': True, 'enable_hidream': True}
 ✓ Applied module replacements: sdxl_clip, hidream
 Module replacement process completed!
