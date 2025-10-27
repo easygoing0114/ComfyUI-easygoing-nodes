@@ -9,6 +9,7 @@ import comfy.sd
 from comfy.cli_args import args
 import comfy.clip_vision
 import comfy.model_management
+import comfy_extras.nodes_model_merging
 
 # LAB color space profiles
 sRGB_profile = ImageCms.createProfile("sRGB")
@@ -110,7 +111,7 @@ class HDREffectsLabAdjust:
                 'hdr_intensity': ('FLOAT', {'default': 0.75, 'min': 0.0, 'max': 5.0, 'step': 0.01}),
                 'shadow_intensity': ('FLOAT', {'default': 0.75, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'highlight_intensity': ('FLOAT', {'default': 0.25, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'gamma_intensity': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'gamma_intensity': ('FLOAT', {'default': 0.0, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
                 'ab_strength': ('FLOAT', {'default': 0.1, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'a_adjustment': ('FLOAT', {'default': 0.03, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
                 'b_adjustment': ('FLOAT', {'default': -0.05, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
@@ -177,7 +178,7 @@ class HDREffectsLabAdjust:
         
         return pil2tensor(color_adjusted)
 
-
+# Custom node: SaveImageWithPrompt
 class SaveImageWithPrompt:
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
@@ -189,24 +190,21 @@ class SaveImageWithPrompt:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "images": ("IMAGE", {"tooltip": "The images to save."}),
-                "filename_prefix": ("STRING", {"default": "ComfyUI", "tooltip": "The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."}),
-                "positive_prompt": ("STRING", {"default": "", "tooltip": "The positive prompt to embed in the image metadata."}),
-                "negative_prompt": ("STRING", {"default": "", "tooltip": "The negative prompt to embed in the image metadata."}),
-                "caption": ("STRING", {"default": "", "tooltip": "The caption to embed in the image metadata."}),
-                "numbers": ("BOOLEAN", {"default": True, "tooltip": "Add sequential numbers to the filename."}),
+                "images": ("IMAGE", ),
+                "filename_prefix": ("STRING", {"default": "ComfyUI"}),
+                "positive_prompt": ("STRING", {"default": ""}),
+                "negative_prompt": ("STRING", {"default": ""}),
+                "caption": ("STRING", {"default": ""}),
+                "numbers": ("BOOLEAN", {"default": True, "label_on": "Include Numbers", "label_off": "No Numbers"}),
             },
-            "hidden": {
-                "prompt": "PROMPT",
-                "extra_pnginfo": "EXTRA_PNGINFO",
-            },
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     RETURN_TYPES = ()
     FUNCTION = "save_images"
     OUTPUT_NODE = True
     CATEGORY = "image"
-    DESCRIPTION = "Saves the input images to your ComfyUI output directory with positive and negative prompts and caption in metadata."
+    DESCRIPTION = "Saves images to your ComfyUI output directory with positive and negative prompts and caption in metadata."
 
     def save_images(self, images, filename_prefix="ComfyUI", positive_prompt="", negative_prompt="", caption="", numbers=True, prompt=None, extra_pnginfo=None):
         # Truncate filename_prefix to 200 characters if it exceeds that length
@@ -373,6 +371,28 @@ class CLIPVisionLoaderSetDevice:
         print(f"CLIP vision model loaded to {load_device}")
         return (clip_vision,)
 
+class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
+    CATEGORY = "advanced/model_merging/model_specific"
+    DESCRIPTION = "Merge node for HiDream series models (Full, Dev, Fast). Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31 based on provided keys."
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = { "model1": ("MODEL",),
+                              "model2": ("MODEL",)}
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        arg_dict["x_embedder."] = argument
+        arg_dict["t_embedder."] = argument
+        arg_dict["caption_projection."] = argument
+
+        for i in range(13):
+            arg_dict["double_stream_blocks.{}.".format(i)] = argument
+
+        for i in range(32):
+            arg_dict["single_stream_blocks.{}.".format(i)] = argument
+
+        return {"required": arg_dict}
 
 NODE_CLASS_MAPPINGS = {
     "HDR Effects with LAB Adjust": HDREffectsLabAdjust,
@@ -380,6 +400,7 @@ NODE_CLASS_MAPPINGS = {
     "QuadrupleCLIPLoaderSetDevice": QuadrupleCLIPLoaderSetDevice,
     "TripleCLIPLoaderSetDevice": TripleCLIPLoaderSetDevice,
     "CLIPVisionLoaderSetDevice": CLIPVisionLoaderSetDevice,
+    "ModelMergeHiDream": ModelMergeHiDream,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -387,5 +408,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveImageWithPrompt": "Save Image With Prompt",
     "QuadrupleCLIPLoaderSetDevice": "Quadruple CLIP Loader (Set Device)",
     "TripleCLIPLoaderSetDevice": "Triple CLIP Loader (Set Device)",
-    "CLIPVisionLoaderSetDevice": "Load CLIP Vision (Set Device)",    
+    "CLIPVisionLoaderSetDevice": "Load CLIP Vision (Set Device)",
+    "ModelMergeHiDream": "Model Merge HiDream",
 }
