@@ -13,8 +13,8 @@ Enhanced text encoders and custom nodes for [ComfyUI](https://github.com/comfyan
 Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced versions that include:
 
 - **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
-- **HiDream Text Encoder** – an advanced encoder optimized for CPU efficiency and improved memory management  
-  - Disabled by default since ComfyUI’s built-in `HiDream.py` now provides similar functionality.
+- (HiDream Text Encoder) – an advanced encoder optimized for CPU efficiency and improved memory management  
+  - Disabled by default because ComfyUI’s built-in `HiDream.py` has been updated.
 
 These replacements can be toggled on or off individually from ComfyUI's settings.
 
