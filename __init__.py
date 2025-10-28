@@ -60,7 +60,6 @@ def apply_custom_modules():
             if replace_module_with_custom("comfy.sdxl_clip", custom_sdxl_clip_path):
                 applied_modules.append("sdxl_clip")
         else:
-            print("Info: SDXL CLIP replacement disabled in settings")
             skipped_modules.append("sdxl_clip")
     
     # hidream.pyの置き換え
@@ -69,7 +68,6 @@ def apply_custom_modules():
             if replace_module_with_custom("comfy.text_encoders.hidream", custom_hidream_path):
                 applied_modules.append("hidream")
         else:
-            print("Info: HiDream replacement disabled in settings")
             skipped_modules.append("hidream")
     
     # 結果のサマリーを表示
@@ -97,7 +95,6 @@ def setup_web_api():
 try:
     apply_custom_modules()
     setup_web_api()
-    print("Module replacement process completed!")
 except Exception:
     pass
 
