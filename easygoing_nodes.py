@@ -60,17 +60,17 @@ def apply_midtone_weight(values, adjustment_strength):
     """
     # 0-1の範囲に正規化
     normalized = values / 255.0
-    
+
     # ベル曲線のような重み（中間調で最大、両極で最小）
     # 0.5で最大値1.0、0と1で最小値0を持つ関数
     midtone_weight = 4.0 * normalized * (1.0 - normalized)  # 0.5で1.0、0と1で0
-    
+
     # 調整値を計算（重み付きで適用）
     adjustment = adjustment_strength * midtone_weight
-    
+
     # 調整を適用
     adjusted_values = values * (1.0 + adjustment)
-    
+
     return np.clip(adjusted_values, 0, 255).astype(np.uint8)
 
 def blend_ab_channels(original_a, original_b, adjusted_a, adjusted_b, ab_strength):
@@ -82,15 +82,15 @@ def blend_ab_channels(original_a, original_b, adjusted_a, adjusted_b, ab_strengt
     orig_b_array = np.array(original_b, dtype=np.float32)
     adj_a_array = np.array(adjusted_a, dtype=np.float32)
     adj_b_array = np.array(adjusted_b, dtype=np.float32)
-    
+
     # ブレンド (ab_strength=0で元画像、ab_strength=1で調整後)
     blended_a = orig_a_array * (1 - ab_strength) + adj_a_array * ab_strength
     blended_b = orig_b_array * (1 - ab_strength) + adj_b_array * ab_strength
-    
+
     # クリッピングしてPILイメージに変換
     blended_a = np.clip(blended_a, 0, 255).astype(np.uint8)
     blended_b = np.clip(blended_b, 0, 255).astype(np.uint8)
-    
+
     return Image.fromarray(blended_a), Image.fromarray(blended_b)
 
 def apply_to_batch(func):
@@ -126,15 +126,15 @@ class HDREffectsLabAdjust:
     CATEGORY = 'SuperBeastsAI/Image'
 
     @apply_to_batch
-    def apply_hdr2(self, image, hdr_intensity=0.75, shadow_intensity=0.75, highlight_intensity=0.25, 
+    def apply_hdr2(self, image, hdr_intensity=0.75, shadow_intensity=0.75, highlight_intensity=0.25,
                    ab_strength=0.1, a_adjustment=0.03, b_adjustment=-0.05,
                    gamma_intensity=0, contrast=0.1, enhance_color=0.25):
         img = tensor2pil(image)
-        
+
         # Convert to LAB
         img_lab = ImageCms.profileToProfile(img, sRGB_profile, Lab_profile, outputMode='LAB')
         luminance, a, b = img_lab.split()
-        
+
         # Convert to NumPy arrays
         lum_array = np.array(luminance, dtype=np.float32)
         a_array = np.array(a, dtype=np.float32)
@@ -143,7 +143,7 @@ class HDREffectsLabAdjust:
         # Apply midtone-weighted adjustments to A and B channels
         adjusted_a_array = a_array.copy()
         adjusted_b_array = b_array.copy()
-        
+
         if a_adjustment != 0.0:
             adjusted_a_array = apply_midtone_weight(adjusted_a_array, a_adjustment)
         if b_adjustment != 0.0:
@@ -159,7 +159,7 @@ class HDREffectsLabAdjust:
         # Apply HDR adjustments
         shadows_adjusted = adjust_shadows_non_linear(luminance, shadow_intensity)
         highlights_adjusted = adjust_highlights_non_linear(luminance, highlight_intensity)
-        merged_adjustments = merge_adjustments_with_blend_modes(lum_array, shadows_adjusted, highlights_adjusted, 
+        merged_adjustments = merge_adjustments_with_blend_modes(lum_array, shadows_adjusted, highlights_adjusted,
                                                                hdr_intensity, shadow_intensity, highlight_intensity)
 
         # Apply gamma correction
@@ -171,11 +171,11 @@ class HDREffectsLabAdjust:
 
         # Convert back to RGB
         img_adjusted = ImageCms.profileToProfile(adjusted_lab, Lab_profile, sRGB_profile, outputMode='RGB')
-        
+
         # Enhance contrast and color
         contrast_adjusted = ImageEnhance.Contrast(img_adjusted).enhance(1 + contrast)
         color_adjusted = ImageEnhance.Color(contrast_adjusted).enhance(1 + enhance_color * 0.2)
-        
+
         return pil2tensor(color_adjusted)
 
 # Custom node: SaveImageWithPrompt
@@ -210,11 +210,11 @@ class SaveImageWithPrompt:
         # Truncate filename_prefix to 200 characters if it exceeds that length
         if len(filename_prefix) > 180:
             filename_prefix = filename_prefix[:180]
-            
+
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])
         results = list()
-        
+
         for (batch_number, image) in enumerate(images):
             i = 255. * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
@@ -237,15 +237,15 @@ class SaveImageWithPrompt:
                 if extra_pnginfo is not None:
                     for x in extra_pnginfo:
                         metadata.add_text(x, json.dumps(extra_pnginfo[x]))
-            
+
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
-            
+
             # numbersトグルによってファイル名の形式を変更
             if numbers:
                 file = f"{filename_with_batch_num}_{counter:05}_.png"
             else:
                 file = f"{filename_with_batch_num}.png"
-            
+
             img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=self.compress_level)
             results.append({
                 "filename": file,
@@ -253,7 +253,7 @@ class SaveImageWithPrompt:
                 "type": self.type
             })
             counter += 1
-        
+
         return {"ui": {"images": results}}
 
 class QuadrupleCLIPLoaderSetDevice:
@@ -292,7 +292,7 @@ class QuadrupleCLIPLoaderSetDevice:
             model_options=model_options
         )
         return (clip,)
-    
+
 class TripleCLIPLoaderSetDevice:
     @classmethod
     def INPUT_TYPES(s):
@@ -306,12 +306,12 @@ class TripleCLIPLoaderSetDevice:
                 "device": (["default", "cpu"], {"advanced": True}),
             }
         }
-    
+
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
     CATEGORY = "advanced/loaders"
     DESCRIPTION = "[Recipes]\n\nsd3: clip-l, clip-g, t5"
-    
+
     def load_clip(self, clip_name1, clip_name2, clip_name3, device="default"):
         clip_path1 = folder_paths.get_full_path_or_raise("text_encoders", clip_name1)
         clip_path2 = folder_paths.get_full_path_or_raise("text_encoders", clip_name2)
@@ -325,7 +325,7 @@ class TripleCLIPLoaderSetDevice:
             model_options=model_options
         )
         return (clip,)
-    
+
 class CLIPVisionLoaderSetDevice:
     @classmethod
     def INPUT_TYPES(s):
@@ -337,7 +337,7 @@ class CLIPVisionLoaderSetDevice:
                 "device": (["default", "cpu"], {"advanced": True}),
             }
         }
-    
+
     RETURN_TYPES = ("CLIP_VISION",)
     FUNCTION = "load_clip"
     CATEGORY = "advanced/loaders"
@@ -346,7 +346,7 @@ class CLIPVisionLoaderSetDevice:
     def load_clip(self, clip_name, device="default"):
         # Get the full path of the CLIP vision model
         clip_path = folder_paths.get_full_path_or_raise("clip_vision", clip_name)
-        
+
         # Set device configuration
         if device == "cpu":
             load_device = torch.device("cpu")
@@ -354,22 +354,67 @@ class CLIPVisionLoaderSetDevice:
         else:
             load_device = comfy.model_management.text_encoder_device()
             offload_device = comfy.model_management.text_encoder_offload_device()
-        
+
         # Load the CLIP vision model
         clip_vision = comfy.clip_vision.load(clip_path)
         if clip_vision is None:
             raise RuntimeError("Error: CLIP vision file is invalid and does not contain a valid vision model.")
-        
+
         # Update ModelPatcher device settings
         clip_vision.patcher.load_device = load_device
         clip_vision.patcher.offload_device = offload_device
-        
+
         # Ensure the model is loaded to the specified device
         comfy.model_management.load_model_gpu(clip_vision.patcher)
-        
+
         # Log the device used for loading
         print(f"CLIP vision model loaded to {load_device}")
         return (clip_vision,)
+
+class CheckpointLoaderSetClipDevice:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ckpt_name": (folder_paths.get_filename_list("checkpoints"), {
+                    "tooltip": "The name of the checkpoint (model) to load."
+                }),
+                "clip_device": (["default", "cpu"], {
+                    "default": "cpu",
+                    "tooltip": "Device where CLIP model will be loaded. 'cpu' keeps CLIP in CPU memory, 'default' uses the standard device allocation."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE")
+    OUTPUT_TOOLTIPS = (
+        "The model used for denoising latents.",
+        "The CLIP model used for encoding text prompts.",
+        "The VAE model used for encoding and decoding images to and from latent space."
+    )
+    FUNCTION = "load_checkpoint"
+    CATEGORY = "loaders"
+    DESCRIPTION = "Loads a diffusion model checkpoint with the option to specify CLIP device location. Setting CLIP to CPU can save VRAM."
+
+    def load_checkpoint(self, ckpt_name, clip_device="cpu"):
+        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+
+        # モデルオプションの設定
+        model_options = {}
+        if clip_device == "cpu":
+            model_options["load_device"] = torch.device("cpu")
+            model_options["offload_device"] = torch.device("cpu")
+
+        # チェックポイントのロード
+        out = comfy.sd.load_checkpoint_guess_config(
+            ckpt_path,
+            output_vae=True,
+            output_clip=True,
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            model_options=model_options
+        )
+
+        return out[:3]
 
 class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
     CATEGORY = "advanced/model_merging/model_specific"
@@ -394,13 +439,756 @@ class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
 
         return {"required": arg_dict}
 
+class CLIPScaleDualSDXLBlock:
+    """
+    SDXL DualCLIP（CLIP-L + CLIP-G）の特定の層をスケーリングするノード
+    scale=1.0 でそのまま、scale=0.0 で完全に抑制
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "clip": ("CLIP",),
+        }
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        # --- CLIP-L (12 layers) ---
+        arg_dict["clip_l.embeddings"] = argument
+        for i in range(12):
+            arg_dict[f"clip_l.encoder.layers.{i}"] = argument
+        arg_dict["clip_l.final_layer_norm"] = argument
+
+        # --- CLIP-G (32 layers) ---
+        arg_dict["clip_g.embeddings"] = argument
+        for i in range(32):
+            arg_dict[f"clip_g.encoder.layers.{i}"] = argument
+        arg_dict["clip_g.final_layer_norm"] = argument
+        arg_dict["clip_g.text_projection"] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    DESCRIPTION = "Scale specific layers of SDXL Dual CLIP (CLIP-L: 12 layers, CLIP-G: 32 layers). Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+
+    def scale(self, clip, **kwargs):
+        # クローンを作成（モデルラッパーのみ、重みは共有）
+        m = clip.clone()
+
+        # モデルの全重み（State Dict）を取得
+        # これにより "clip_l.transformer.text_model..." のような完全なキーが取得できます
+        sd = m.get_sd()
+
+        # 設定されたスケール値を辞書として整理
+        scales_args = {k: v for k, v in kwargs.items() if k != "clip" and v != 1.0}
+
+        # 何も変更がない場合はそのまま返す
+        if not scales_args:
+            return (m,)
+
+        # スケールごとに適用するパッチをまとめるための辞書
+        # { scale_value: { key: (weight_tensor,) } }
+        patches_by_scale = {}
+
+        for key, weight in sd.items():
+            # 無視するキー
+            if key.endswith(".position_ids") or key.endswith(".logit_scale"):
+                continue
+
+            # キーのマッチング処理
+            # SDXLの内部キーは "clip_l.transformer.text_model.encoder..." のように長いため
+            # ユーザー引数 ("clip_l.encoder...") とマッチするように正規化します
+            normalized_key = key.replace(".transformer.text_model.", ".")
+            normalized_key = normalized_key.replace(".text_model.", ".") # 念のため
+
+            target_scale = 1.0
+
+            # 最も具体的にマッチする引数を探す
+            # 例: "clip_l.encoder.layers.0" は "clip_l.encoder" よりも優先されるべき
+            matched_arg_len = 0
+
+            for arg_name, scale_val in scales_args.items():
+                if normalized_key.startswith(arg_name):
+                    # より長いキー名でのマッチを優先（より具体的であるため）
+                    if len(arg_name) > matched_arg_len:
+                        target_scale = scale_val
+                        matched_arg_len = len(arg_name)
+
+            # スケール変更が必要な場合
+            if target_scale != 1.0:
+                if target_scale not in patches_by_scale:
+                    patches_by_scale[target_scale] = {}
+
+                # パッチとして「元の重み」を登録
+                patches_by_scale[target_scale][key] = (weight,)
+
+        # パッチの適用
+        # add_patches({key: (patch,)}, strength_patch, strength_model)
+        # 計算式: Final = Model * strength_model + Patch * strength_patch
+        # ここで Patch = Model なので
+        # Final = Model * 1.0 + Model * (scale - 1.0)
+        #       = Model * (1.0 + scale - 1.0)
+        #       = Model * scale
+        for s, patches in patches_by_scale.items():
+            m.add_patches(patches, s - 1.0, 1.0)
+
+        return (m,)
+
+class CLIPScaleQwenBlock:
+    """
+    Qwen-2.5-VL-7B CLIPの特定の層をスケーリングするノード
+    scale=1.0 でそのまま、scale=0.0 で完全に抑制
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "clip": ("CLIP",),
+        }
+
+        # scale: 1.0 = そのまま, 0.0 = 完全に抑制（ゼロ化）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        arg_dict["model.embed_tokens"] = argument
+        arg_dict["visual.patch_embed"] = argument
+
+        # Qwen2-VL-7B (Visual: 32 blocks)
+        for i in range(32):
+            arg_dict[f"visual.blocks.{i}"] = argument
+
+        arg_dict["visual.merger"] = argument
+
+        # Qwen2-VL-7B (LLM: 28 layers)
+        for i in range(28):
+            arg_dict[f"model.layers.{i}"] = argument
+
+        arg_dict["model.norm"] = argument
+        arg_dict["lm_head"] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+    DESCRIPTION = "Scale specific layers of Qwen-2.5-VL-7B CLIP. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+
+    def scale(self, clip, **kwargs):
+        # モデルのクローンを作成
+        m = clip.clone()
+
+        # 設定されたスケール値を辞書として整理
+        scales_args = {k: v for k, v in kwargs.items() if k != "clip" and v != 1.0}
+
+        # 何も変更がない場合はそのまま返す
+        if not scales_args:
+            return (m,)
+
+        # キーパッチを取得
+        kp = clip.get_key_patches()
+
+        # スケールごとにパッチをまとめる
+        patches_by_scale = {}
+
+        for key in kp:
+            # 不要なキーをスキップ
+            if key.endswith(".position_ids") or key.endswith(".logit_scale"):
+                continue
+
+            # キーの正規化
+            # "transformer." プレフィックスを除去（ある場合）
+            normalized_key = key
+            if normalized_key.startswith("transformer."):
+                normalized_key = normalized_key[len("transformer."):]
+
+            target_scale = 1.0
+            matched_arg_len = 0
+
+            # 引数名とキーの前方一致で判定（最長マッチ）
+            for arg_name, scale_val in scales_args.items():
+                if normalized_key.startswith(arg_name):
+                    # より長くマッチする場合のみ更新
+                    # "model.layers.1" と "model.layers.10" の誤爆を防ぐ
+                    next_char_idx = len(arg_name)
+                    if next_char_idx == len(normalized_key) or normalized_key[next_char_idx] == '.':
+                        if len(arg_name) > matched_arg_len:
+                            target_scale = scale_val
+                            matched_arg_len = len(arg_name)
+
+            # スケール変更が必要な場合
+            if target_scale != 1.0:
+                if target_scale not in patches_by_scale:
+                    patches_by_scale[target_scale] = {}
+                patches_by_scale[target_scale][key] = kp[key]
+
+        # パッチの適用
+        # add_patches(patches, strength_patch, strength_model)
+        # Final = Model * strength_model + Patch * strength_patch
+        # 目標: Model * scale なので、Patch = Model として
+        # scale = strength_model + strength_patch
+        # strength_model = 0, strength_patch = scale とする
+        for scale_val, patches in patches_by_scale.items():
+            m.add_patches(patches, scale_val, 0.0)
+
+        return (m,)
+
+class CLIPSaveQwen:
+    def __init__(self):
+        self.output_dir = folder_paths.get_output_directory()
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "clip": ("CLIP",),
+                "filename_prefix": ("STRING", {"default": "qwen_2.5_vl_merged"}),
+            },
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save"
+    OUTPUT_NODE = True
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    DESCRIPTION = "Saves Qwen-2.5-VL-7B CLIP models by stripping the internal 'qwen25_7b.transformer.' prefix."
+
+    def save(self, clip, filename_prefix, prompt=None, extra_pnginfo=None):
+        # メタデータの準備
+        prompt_info = ""
+        if prompt is not None:
+            prompt_info = json.dumps(prompt)
+
+        metadata = {}
+        if not args.disable_metadata:
+            metadata["format"] = "pt"
+            metadata["prompt"] = prompt_info
+            if extra_pnginfo is not None:
+                for x in extra_pnginfo:
+                    metadata[x] = json.dumps(extra_pnginfo[x])
+
+        # モデルのState Dictを取得
+        # ComfyUIはモデルをラップしているため、内部キーにアクセスします
+        clip_sd = clip.get_sd()
+
+        # 保存用の新しい辞書を作成
+        output_sd = {}
+
+        # 削除対象のプレフィックス
+        # ログ に基づき "qwen25_7b.transformer." を削除対象とします
+        prefix_to_strip = "qwen25_7b.transformer."
+
+        for k, v in clip_sd.items():
+            if k.startswith(prefix_to_strip):
+                # プレフィックスを削除したキー名にする
+                # 例: qwen25_7b.transformer.model.layers.0... -> model.layers.0...
+                new_key = k[len(prefix_to_strip):]
+                output_sd[new_key] = v
+            elif k.startswith("qwen25_7b."):
+                # logit_scaleなどの例外処理
+                new_key = k.replace("qwen25_7b.", "")
+                output_sd[new_key] = v
+            else:
+                # プレフィックスがない場合はそのまま（通常はないはずですが念のため）
+                output_sd[k] = v
+
+        # ファイルパスの生成
+        full_output_folder, filename, counter, subfolder, filename_prefix = \
+            folder_paths.get_save_image_path(filename_prefix, self.output_dir)
+
+        output_checkpoint = f"{filename}_{counter:05}_.safetensors"
+        output_checkpoint = os.path.join(full_output_folder, output_checkpoint)
+
+        # 保存実行
+        comfy.utils.save_torch_file(output_sd, output_checkpoint, metadata=metadata)
+
+        return {}
+
+class VAEMergeSimple:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "vae1": ("VAE",),
+            "vae2": ("VAE",),
+            "ratio": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+        }}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "merge"
+    CATEGORY = "advanced/model_merging"
+
+    def merge(self, vae1, vae2, ratio):
+        vae1_sd = vae1.get_sd()
+        vae2_sd = vae2.get_sd()
+
+        merged_sd = {}
+        for key in vae1_sd.keys():
+            if key in vae2_sd:
+                merged_sd[key] = (1.0 - ratio) * vae1_sd[key] + ratio * vae2_sd[key]
+            else:
+                merged_sd[key] = vae1_sd[key]
+
+        merged_vae = comfy.sd.VAE(sd=merged_sd)
+        return (merged_vae,)
+
+
+class VAEMergeSubtract:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "vae1": ("VAE",),
+            "vae2": ("VAE",),
+            "multiplier": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+        }}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "merge"
+    CATEGORY = "advanced/model_merging"
+
+    def merge(self, vae1, vae2, multiplier):
+        vae1_sd = vae1.get_sd()
+        vae2_sd = vae2.get_sd()
+
+        merged_sd = {}
+        for key in vae1_sd.keys():
+            if key in vae2_sd:
+                merged_sd[key] = vae1_sd[key] - multiplier * vae2_sd[key]
+            else:
+                merged_sd[key] = vae1_sd[key]
+
+        merged_vae = comfy.sd.VAE(sd=merged_sd)
+        return (merged_vae,)
+
+class VAEMergeAdd:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "vae1": ("VAE",),
+            "vae2": ("VAE",),
+        }}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "merge"
+    CATEGORY = "advanced/model_merging"
+
+    def merge(self, vae1, vae2):
+        vae1_sd = vae1.get_sd()
+        vae2_sd = vae2.get_sd()
+
+        merged_sd = {}
+        for key in vae1_sd.keys():
+            if key in vae2_sd:
+                merged_sd[key] = vae1_sd[key] + vae2_sd[key]
+            else:
+                merged_sd[key] = vae1_sd[key]
+
+        merged_vae = comfy.sd.VAE(sd=merged_sd)
+        return (merged_vae,)
+
+class VAEScaleSDXLBlock:
+    """
+    SDXL VAEの特定の層をスケーリングするノード
+    scale=1.0 でそのまま、scale=0.0 で完全に抑制
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "vae": ("VAE",),
+        }
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        # --- Quantization layers ---
+        arg_dict["quant_conv"] = argument
+        arg_dict["post_quant_conv"] = argument
+
+        # --- Encoder ---
+        arg_dict["encoder.conv_in"] = argument
+        # Encoder down_blocks (0-3)
+        for i in range(4):
+            arg_dict[f"encoder.down_blocks.{i}."] = argument
+        # Encoder mid_block
+        arg_dict["encoder.mid_block.attentions.0."] = argument
+        arg_dict["encoder.mid_block.resnets.0."] = argument
+        arg_dict["encoder.mid_block.resnets.1."] = argument
+        arg_dict["encoder.conv_norm_out"] = argument
+        arg_dict["encoder.conv_out"] = argument
+
+        # --- Decoder ---
+        arg_dict["decoder.conv_in"] = argument
+        # Decoder mid_block
+        arg_dict["decoder.mid_block.attentions.0."] = argument
+        arg_dict["decoder.mid_block.resnets.0."] = argument
+        arg_dict["decoder.mid_block.resnets.1."] = argument
+        # Decoder up_blocks (0-3)
+        for i in range(4):
+            arg_dict[f"decoder.up_blocks.{i}."] = argument
+        arg_dict["decoder.conv_norm_out"] = argument
+        arg_dict["decoder.conv_out"] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    DESCRIPTION = "Scale specific layers of SDXL VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+
+    def scale(self, vae, **kwargs):
+        import torch
+
+        ratios = {k: v for k, v in kwargs.items() if k != "vae"}
+
+        sd = vae.get_sd()
+        new_sd = {}
+
+        for k, v in sd.items():
+            scale = 1.0
+            matched_arg_len = 0
+
+            for arg_name, arg_value in ratios.items():
+                if k.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale = arg_value
+                        matched_arg_len = len(arg_name)
+
+            if scale != 1.0:
+                new_sd[k] = v * scale
+            else:
+                new_sd[k] = v
+
+        new_vae = comfy.sd.VAE(sd=new_sd)
+
+        return (new_vae,)
+
+
+class VAEMergeSDXLBlock:
+    """
+    2つのSDXL VAEをブロック単位でマージするノード
+    ratio=1.0 で vae2 を使用、ratio=0.0 で vae1 を使用
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "vae1": ("VAE",),
+            "vae2": ("VAE",),
+        }
+
+        argument = ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        # --- Quantization layers ---
+        arg_dict["quant_conv"] = argument
+        arg_dict["post_quant_conv"] = argument
+
+        # --- Encoder ---
+        arg_dict["encoder.conv_in"] = argument
+        for i in range(4):
+            arg_dict[f"encoder.down_blocks.{i}."] = argument
+        arg_dict["encoder.mid_block.attentions.0."] = argument
+        arg_dict["encoder.mid_block.resnets.0."] = argument
+        arg_dict["encoder.mid_block.resnets.1."] = argument
+        arg_dict["encoder.conv_norm_out"] = argument
+        arg_dict["encoder.conv_out"] = argument
+
+        # --- Decoder ---
+        arg_dict["decoder.conv_in"] = argument
+        arg_dict["decoder.mid_block.attentions.0."] = argument
+        arg_dict["decoder.mid_block.resnets.0."] = argument
+        arg_dict["decoder.mid_block.resnets.1."] = argument
+        for i in range(4):
+            arg_dict[f"decoder.up_blocks.{i}."] = argument
+        arg_dict["decoder.conv_norm_out"] = argument
+        arg_dict["decoder.conv_out"] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "merge"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    DESCRIPTION = "Block-wise merging for SDXL VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2."
+
+    def merge(self, vae1, vae2, **kwargs):
+        import torch
+
+        ratios = {k: v for k, v in kwargs.items() if k not in ["vae1", "vae2"]}
+
+        sd1 = vae1.get_sd()
+        sd2 = vae2.get_sd()
+
+        new_sd = {}
+
+        for k in sd1.keys():
+            if k not in sd2:
+                new_sd[k] = sd1[k]
+                continue
+
+            ratio = 0.5
+            matched_arg_len = 0
+
+            for arg_name, arg_value in ratios.items():
+                if k.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        ratio = arg_value
+                        matched_arg_len = len(arg_name)
+
+            new_sd[k] = sd1[k] * (1.0 - ratio) + sd2[k] * ratio
+
+        for k in sd2.keys():
+            if k not in new_sd:
+                new_sd[k] = sd2[k]
+
+        new_vae = comfy.sd.VAE(sd=new_sd)
+
+        return (new_vae,)
+
+class VAEScaleQwenBlock:
+    """
+    Qwen Image VAEの特定の層をスケーリングするノード
+    scale=1.0 でそのまま、scale=0.0 で完全に抑制
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "vae": ("VAE",),
+        }
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        # --- Global conv layers ---
+        arg_dict["conv1"] = argument
+        arg_dict["conv2"] = argument
+
+        # --- Encoder ---
+        arg_dict["encoder.conv1"] = argument
+        # Encoder downsamples (0-10)
+        for i in range(11):
+            arg_dict[f"encoder.downsamples.{i}."] = argument
+        # Encoder middle (0-2)
+        for i in range(3):
+            arg_dict[f"encoder.middle.{i}."] = argument
+        arg_dict["encoder.head"] = argument
+
+        # --- Decoder ---
+        arg_dict["decoder.conv1"] = argument
+        # Decoder middle (0-2)
+        for i in range(3):
+            arg_dict[f"decoder.middle.{i}."] = argument
+        # Decoder upsamples (0-14)
+        for i in range(15):
+            arg_dict[f"decoder.upsamples.{i}."] = argument
+        arg_dict["decoder.head"] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    DESCRIPTION = "Scale specific layers of Qwen Image VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+
+    def scale(self, vae, **kwargs):
+        import torch
+        import copy
+
+        # VAEをクローン
+        # ComfyUIのVAEオブジェクトは直接cloneメソッドを持たない場合があるので
+        # 内部のstate_dictを操作する
+
+        ratios = {k: v for k, v in kwargs.items() if k != "vae"}
+
+        # VAEの内部モデルにアクセス
+        # ComfyUIのVAEラッパーを通じてstate_dictを取得・設定
+        device = vae.device
+        sd = vae.get_sd()
+
+        new_sd = {}
+
+        for k, v in sd.items():
+            scale = 1.0
+            matched_arg_len = 0
+
+            for arg_name, arg_value in ratios.items():
+                if k.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale = arg_value
+                        matched_arg_len = len(arg_name)
+
+            if scale != 1.0:
+                new_sd[k] = v * scale
+            else:
+                new_sd[k] = v
+
+        # 新しいVAEを作成
+        new_vae = comfy.sd.VAE(sd=new_sd)
+
+        return (new_vae,)
+
+
+class VAEMergeQwenBlock:
+    """
+    2つのQwen Image VAEをブロック単位でマージするノード
+    ratio=1.0 で vae2 を使用、ratio=0.0 で vae1 を使用
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "vae1": ("VAE",),
+            "vae2": ("VAE",),
+        }
+
+        argument = ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        # --- Global conv layers ---
+        arg_dict["conv1"] = argument
+        arg_dict["conv2"] = argument
+
+        # --- Encoder ---
+        arg_dict["encoder.conv1"] = argument
+        for i in range(11):
+            arg_dict[f"encoder.downsamples.{i}."] = argument
+        for i in range(3):
+            arg_dict[f"encoder.middle.{i}."] = argument
+        arg_dict["encoder.head"] = argument
+
+        # --- Decoder ---
+        arg_dict["decoder.conv1"] = argument
+        for i in range(3):
+            arg_dict[f"decoder.middle.{i}."] = argument
+        for i in range(15):
+            arg_dict[f"decoder.upsamples.{i}."] = argument
+        arg_dict["decoder.head"] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "merge"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    DESCRIPTION = "Block-wise merging for Qwen Image VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2."
+
+    def merge(self, vae1, vae2, **kwargs):
+        import torch
+
+        ratios = {k: v for k, v in kwargs.items() if k not in ["vae1", "vae2"]}
+
+        sd1 = vae1.get_sd()
+        sd2 = vae2.get_sd()
+
+        new_sd = {}
+
+        for k in sd1.keys():
+            if k not in sd2:
+                new_sd[k] = sd1[k]
+                continue
+
+            ratio = 0.5  # デフォルトは50/50マージ
+            matched_arg_len = 0
+
+            for arg_name, arg_value in ratios.items():
+                if k.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        ratio = arg_value
+                        matched_arg_len = len(arg_name)
+
+            # ratio=0.0: vae1, ratio=1.0: vae2
+            new_sd[k] = sd1[k] * (1.0 - ratio) + sd2[k] * ratio
+
+        # vae2にしかないキーがあれば追加
+        for k in sd2.keys():
+            if k not in new_sd:
+                new_sd[k] = sd2[k]
+
+        new_vae = comfy.sd.VAE(sd=new_sd)
+
+        return (new_vae,)
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "vae1": ("VAE",),
+            "vae2": ("VAE",)
+        }
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        # Qwen Image Edit VAE構造に基づいた階層
+        # Encoder部分
+        arg_dict["encoder.conv_in."] = argument
+
+        # Encoder down blocks (4階層)
+        for i in range(4):
+            arg_dict[f"encoder.down_blocks.{i}."] = argument
+
+        arg_dict["encoder.mid_block."] = argument
+        arg_dict["encoder.conv_out."] = argument
+
+        # Decoder部分
+        arg_dict["decoder.conv_in."] = argument
+        arg_dict["decoder.mid_block."] = argument
+
+        # Decoder up blocks (4階層)
+        for i in range(4):
+            arg_dict[f"decoder.up_blocks.{i}."] = argument
+
+        arg_dict["decoder.conv_out."] = argument
+
+        # Quant/Post-quant convolutions
+        arg_dict["quant_conv."] = argument
+        arg_dict["post_quant_conv."] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "merge"
+    CATEGORY = "advanced/model_merging"
+    DESCRIPTION = "Layer-wise merging for Qwen Image Edit VAE. Allows fine-grained control over encoder, decoder, and quantization layers."
+
+    def merge(self, vae1, vae2, **kwargs):
+        vae1_sd = vae1.get_sd()
+        vae2_sd = vae2.get_sd()
+
+        # デフォルト比率（最初の引数）
+        default_ratio = next(iter(kwargs.values()))
+
+        merged_sd = {}
+        for key in vae1_sd.keys():
+            if key not in vae2_sd:
+                merged_sd[key] = vae1_sd[key]
+                continue
+
+            # このキーに適用する比率を決定
+            ratio = default_ratio
+            last_arg_size = 0
+
+            for arg_prefix in kwargs:
+                if key.startswith(arg_prefix) and last_arg_size < len(arg_prefix):
+                    ratio = kwargs[arg_prefix]
+                    last_arg_size = len(arg_prefix)
+
+            # マージ実行
+            merged_sd[key] = (1.0 - ratio) * vae1_sd[key] + ratio * vae2_sd[key]
+
+        merged_vae = comfy.sd.VAE(sd=merged_sd)
+        return (merged_vae,)
+
 NODE_CLASS_MAPPINGS = {
     "HDR Effects with LAB Adjust": HDREffectsLabAdjust,
     "SaveImageWithPrompt": SaveImageWithPrompt,
     "QuadrupleCLIPLoaderSetDevice": QuadrupleCLIPLoaderSetDevice,
     "TripleCLIPLoaderSetDevice": TripleCLIPLoaderSetDevice,
     "CLIPVisionLoaderSetDevice": CLIPVisionLoaderSetDevice,
+    "CheckpointLoaderSetClipDevice": CheckpointLoaderSetClipDevice,
     "ModelMergeHiDream": ModelMergeHiDream,
+    "CLIPScaleDualSDXLBlock": CLIPScaleDualSDXLBlock,
+    "CLIPScaleQwenBlock": CLIPScaleQwenBlock,
+    "CLIPSaveQwen": CLIPSaveQwen,
+    "VAEMergeSimple": VAEMergeSimple,
+    "VAEMergeSubtract": VAEMergeSubtract,
+    "VAEMergeAdd": VAEMergeAdd,
+    "VAEScaleSDXLBlock": VAEScaleSDXLBlock,
+    "VAEMergeSDXLBlock": VAEMergeSDXLBlock,
+    "VAEScaleQwenBlock": VAEScaleQwenBlock,
+    "VAEMergeQwenBlock": VAEMergeQwenBlock,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -409,5 +1197,16 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "QuadrupleCLIPLoaderSetDevice": "Quadruple CLIP Loader (Set Device)",
     "TripleCLIPLoaderSetDevice": "Triple CLIP Loader (Set Device)",
     "CLIPVisionLoaderSetDevice": "Load CLIP Vision (Set Device)",
+    "CheckpointLoaderSetClipDevice": "Checkpoint Loader (Set CLIP Device)",
     "ModelMergeHiDream": "Model Merge HiDream",
+    "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
+    "CLIPScaleQwenBlock": "CLIP Scale Qwen Block",
+    "CLIPSaveQwen": "CLIP Save Qwen (Fix Prefix)",
+    "VAEMergeSimple": "VAE Merge Simple",
+    "VAEMergeSubtract": "VAE Merge Subtract",
+    "VAEMergeAdd": "VAE Merge Add",
+    "VAEScaleSDXLBlock": "VAE Scale SDXL Block",
+    "VAEMergeSDXLBlock": "VAE Merge SDXL Block",
+    "VAEScaleQwenBlock": "VAE Scale Qwen Block",
+    "VAEMergeQwenBlock": "VAE Merge Qwen Block",
 }
