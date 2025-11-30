@@ -101,6 +101,11 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Update History
 
+### 2025.12.1
+
+- Implemented CheckpointLoaderSetClipDevice
+- Implemented Many Merge nodes
+
 ### 2025.10.28
 
 - Implemented ModelMergeHiDream
