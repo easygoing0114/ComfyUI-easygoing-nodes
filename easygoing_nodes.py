@@ -942,6 +942,98 @@ class VAEMergeSDXLBlock:
 
         return (new_vae,)
 
+class VAEScaleFluxBlock:
+    """
+    FLUX1 VAEの特定の層をスケーリングするノード
+    scale=1.0 でそのまま、scale=0.0 で完全に抑制
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "vae": ("VAE",),
+        }
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        # --- Encoder ---
+        arg_dict["encoder.conv_in"] = argument
+        arg_dict["encoder.conv_out"] = argument
+        arg_dict["encoder.norm_out"] = argument
+        
+        # Encoder down blocks (0-3)
+        for i in range(4):
+            arg_dict[f"encoder.down.{i}."] = argument
+            # Each down block has multiple sub-blocks (0-2)
+            for j in range(3):
+                arg_dict[f"encoder.down.{i}.block.{j}."] = argument
+            # Downsample layers (0-2 have downsample)
+            if i < 3:
+                arg_dict[f"encoder.down.{i}.downsample."] = argument
+        
+        # Encoder middle blocks
+        arg_dict["encoder.mid."] = argument
+        arg_dict["encoder.mid.block_1."] = argument
+        arg_dict["encoder.mid.block_2."] = argument
+        arg_dict["encoder.mid.attn_1."] = argument
+
+        # --- Decoder ---
+        arg_dict["decoder.conv_in"] = argument
+        arg_dict["decoder.conv_out"] = argument
+        arg_dict["decoder.norm_out"] = argument
+        
+        # Decoder up blocks (0-3)
+        for i in range(4):
+            arg_dict[f"decoder.up.{i}."] = argument
+            # Each up block has multiple sub-blocks (0-2)
+            for j in range(3):
+                arg_dict[f"decoder.up.{i}.block.{j}."] = argument
+            # Upsample layers (1-3 have upsample)
+            if i > 0:
+                arg_dict[f"decoder.up.{i}.upsample."] = argument
+        
+        # Decoder middle blocks
+        arg_dict["decoder.mid."] = argument
+        arg_dict["decoder.mid.block_1."] = argument
+        arg_dict["decoder.mid.block_2."] = argument
+        arg_dict["decoder.mid.attn_1."] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    DESCRIPTION = "Scale specific layers of FLUX1 VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+
+    def scale(self, vae, **kwargs):
+        ratios = {k: v for k, v in kwargs.items() if k != "vae"}
+
+        # VAEのstate_dictを取得
+        sd = vae.get_sd()
+        new_sd = {}
+
+        for k, v in sd.items():
+            scale = 1.0
+            matched_arg_len = 0
+
+            # 最も長くマッチするプレフィックスを見つける
+            for arg_name, arg_value in ratios.items():
+                if k.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale = arg_value
+                        matched_arg_len = len(arg_name)
+
+            # スケーリングを適用
+            if scale != 1.0:
+                new_sd[k] = v * scale
+            else:
+                new_sd[k] = v
+
+        # 新しいVAEを作成
+        new_vae = comfy.sd.VAE(sd=new_sd)
+
+        return (new_vae,)
+
 class VAEScaleQwenBlock:
     """
     Qwen Image VAEの特定の層をスケーリングするノード
@@ -1024,153 +1116,6 @@ class VAEScaleQwenBlock:
 
         return (new_vae,)
 
-
-class VAEMergeQwenBlock:
-    """
-    2つのQwen Image VAEをブロック単位でマージするノード
-    ratio=1.0 で vae2 を使用、ratio=0.0 で vae1 を使用
-    """
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {
-            "vae1": ("VAE",),
-            "vae2": ("VAE",),
-        }
-
-        argument = ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01})
-
-        # --- Global conv layers ---
-        arg_dict["conv1"] = argument
-        arg_dict["conv2"] = argument
-
-        # --- Encoder ---
-        arg_dict["encoder.conv1"] = argument
-        for i in range(11):
-            arg_dict[f"encoder.downsamples.{i}."] = argument
-        for i in range(3):
-            arg_dict[f"encoder.middle.{i}."] = argument
-        arg_dict["encoder.head"] = argument
-
-        # --- Decoder ---
-        arg_dict["decoder.conv1"] = argument
-        for i in range(3):
-            arg_dict[f"decoder.middle.{i}."] = argument
-        for i in range(15):
-            arg_dict[f"decoder.upsamples.{i}."] = argument
-        arg_dict["decoder.head"] = argument
-
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "merge"
-    CATEGORY = "advanced/model_merging/model_specific"
-
-    DESCRIPTION = "Block-wise merging for Qwen Image VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2."
-
-    def merge(self, vae1, vae2, **kwargs):
-        import torch
-
-        ratios = {k: v for k, v in kwargs.items() if k not in ["vae1", "vae2"]}
-
-        sd1 = vae1.get_sd()
-        sd2 = vae2.get_sd()
-
-        new_sd = {}
-
-        for k in sd1.keys():
-            if k not in sd2:
-                new_sd[k] = sd1[k]
-                continue
-
-            ratio = 0.5  # デフォルトは50/50マージ
-            matched_arg_len = 0
-
-            for arg_name, arg_value in ratios.items():
-                if k.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        ratio = arg_value
-                        matched_arg_len = len(arg_name)
-
-            # ratio=0.0: vae1, ratio=1.0: vae2
-            new_sd[k] = sd1[k] * (1.0 - ratio) + sd2[k] * ratio
-
-        # vae2にしかないキーがあれば追加
-        for k in sd2.keys():
-            if k not in new_sd:
-                new_sd[k] = sd2[k]
-
-        new_vae = comfy.sd.VAE(sd=new_sd)
-
-        return (new_vae,)
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {
-            "vae1": ("VAE",),
-            "vae2": ("VAE",)
-        }
-
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
-
-        # Qwen Image Edit VAE構造に基づいた階層
-        # Encoder部分
-        arg_dict["encoder.conv_in."] = argument
-
-        # Encoder down blocks (4階層)
-        for i in range(4):
-            arg_dict[f"encoder.down_blocks.{i}."] = argument
-
-        arg_dict["encoder.mid_block."] = argument
-        arg_dict["encoder.conv_out."] = argument
-
-        # Decoder部分
-        arg_dict["decoder.conv_in."] = argument
-        arg_dict["decoder.mid_block."] = argument
-
-        # Decoder up blocks (4階層)
-        for i in range(4):
-            arg_dict[f"decoder.up_blocks.{i}."] = argument
-
-        arg_dict["decoder.conv_out."] = argument
-
-        # Quant/Post-quant convolutions
-        arg_dict["quant_conv."] = argument
-        arg_dict["post_quant_conv."] = argument
-
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "merge"
-    CATEGORY = "advanced/model_merging"
-    DESCRIPTION = "Layer-wise merging for Qwen Image Edit VAE. Allows fine-grained control over encoder, decoder, and quantization layers."
-
-    def merge(self, vae1, vae2, **kwargs):
-        vae1_sd = vae1.get_sd()
-        vae2_sd = vae2.get_sd()
-
-        # デフォルト比率（最初の引数）
-        default_ratio = next(iter(kwargs.values()))
-
-        merged_sd = {}
-        for key in vae1_sd.keys():
-            if key not in vae2_sd:
-                merged_sd[key] = vae1_sd[key]
-                continue
-
-            # このキーに適用する比率を決定
-            ratio = default_ratio
-            last_arg_size = 0
-
-            for arg_prefix in kwargs:
-                if key.startswith(arg_prefix) and last_arg_size < len(arg_prefix):
-                    ratio = kwargs[arg_prefix]
-                    last_arg_size = len(arg_prefix)
-
-            # マージ実行
-            merged_sd[key] = (1.0 - ratio) * vae1_sd[key] + ratio * vae2_sd[key]
-
-        merged_vae = comfy.sd.VAE(sd=merged_sd)
-        return (merged_vae,)
-
 NODE_CLASS_MAPPINGS = {
     "HDR Effects with LAB Adjust": HDREffectsLabAdjust,
     "SaveImageWithPrompt": SaveImageWithPrompt,
@@ -1187,8 +1132,8 @@ NODE_CLASS_MAPPINGS = {
     "VAEMergeAdd": VAEMergeAdd,
     "VAEScaleSDXLBlock": VAEScaleSDXLBlock,
     "VAEMergeSDXLBlock": VAEMergeSDXLBlock,
+    "VAEScaleFluxBlock": VAEScaleFluxBlock,
     "VAEScaleQwenBlock": VAEScaleQwenBlock,
-    "VAEMergeQwenBlock": VAEMergeQwenBlock,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1207,6 +1152,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VAEMergeAdd": "VAE Merge Add",
     "VAEScaleSDXLBlock": "VAE Scale SDXL Block",
     "VAEMergeSDXLBlock": "VAE Merge SDXL Block",
+    "VAEScaleFluxBlock": "VAE Scale FLUX Block",
     "VAEScaleQwenBlock": "VAE Scale Qwen Block",
-    "VAEMergeQwenBlock": "VAE Merge Qwen Block",
 }
