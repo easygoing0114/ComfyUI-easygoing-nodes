@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-easygoing-nodes"
 description = "Experimental Text Encorder module and HDR Effects and color adjustment in LAB color space nodes by easygoing0114"
-version = "1.1.1"
+version = "1.1.2"
 license = { file = "LICENSE.txt" }
 dependencies  = [] # Filled in from requirements.txt
 
