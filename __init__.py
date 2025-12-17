@@ -29,7 +29,7 @@ def is_module_replacement_enabled(module_name):
     """設定に基づいてモジュール置換が有効かどうかを確認"""
     if not SETTINGS_AVAILABLE:
         return True
-    
+
     try:
         settings_manager = get_settings_manager()
         return settings_manager.is_module_enabled(module_name)
@@ -37,14 +37,13 @@ def is_module_replacement_enabled(module_name):
         return True
 
 def apply_custom_modules():
-    """修正版モジュールを設定に基づいて適用"""
+    """修正版モジュールを設定に基づいて適用（SDXL CLIPのみ）"""
     # 修正版ファイルのパス
     custom_sdxl_clip_path = CUSTOM_NODE_DIR / "modified_modules" / "sdxl_clip.py"
-    custom_hidream_path = CUSTOM_NODE_DIR / "modified_modules" / "hidream.py"
-    
+
     applied_modules = []
     skipped_modules = []
-    
+
     # 設定を読み込んで表示
     if SETTINGS_AVAILABLE:
         try:
@@ -53,7 +52,7 @@ def apply_custom_modules():
             print(f"EasygoingNodes settings loaded: {settings}")
         except Exception:
             pass
-    
+
     # sdxl_clip.pyの置き換え
     if custom_sdxl_clip_path.exists():
         if is_module_replacement_enabled("sdxl_clip"):
@@ -61,28 +60,20 @@ def apply_custom_modules():
                 applied_modules.append("sdxl_clip")
         else:
             skipped_modules.append("sdxl_clip")
-    
-    # hidream.pyの置き換え
-    if custom_hidream_path.exists():
-        if is_module_replacement_enabled("hidream"):
-            if replace_module_with_custom("comfy.text_encoders.hidream", custom_hidream_path):
-                applied_modules.append("hidream")
-        else:
-            skipped_modules.append("hidream")
-    
+
     # 結果のサマリーを表示
     if applied_modules:
         print(f"✓ Applied module replacements: {', '.join(applied_modules)}")
     if skipped_modules:
         print(f"⊘ Skipped module replacements: {', '.join(skipped_modules)}")
-    
+
     return True
 
 def setup_web_api():
     """ComfyUIのWebサーバーにAPIルートを登録"""
     if not SETTINGS_AVAILABLE:
         return
-    
+
     try:
         import server
         if hasattr(server, 'PromptServer'):
@@ -109,7 +100,7 @@ except ImportError:
 WEB_DIRECTORY = "./web"
 
 __all__ = [
-    'NODE_CLASS_MAPPINGS', 
+    'NODE_CLASS_MAPPINGS',
     'NODE_DISPLAY_NAME_MAPPINGS',
     'WEB_DIRECTORY'
 ]

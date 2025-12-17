@@ -1,4 +1,4 @@
-// EasygoingNodes Settings - Minimal Version
+// EasygoingNodes Settings - SDXL CLIP Only Version
 let settingsInitialized = false;
 let initialSyncComplete = false;
 
@@ -6,20 +6,18 @@ let initialSyncComplete = false;
 window.updateEasygoingSetting = async (key, value) => {
     try {
         const currentSdxl = app.ui.settings.getSettingValue?.("EasygoingNodes.enable_sdxl_clip", true);
-        const currentHidream = app.ui.settings.getSettingValue?.("EasygoingNodes.enable_hidream", true);
-        
+
         const settings = {
-            enable_sdxl_clip: currentSdxl,
-            enable_hidream: currentHidream
+            enable_sdxl_clip: currentSdxl
         };
         settings[key] = value;
-        
+
         const response = await fetch("/easygoing_nodes/settings", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(settings)
         });
-        
+
         if (response.ok && initialSyncComplete) {
             showRestartNotification(key, value);
         }
@@ -32,7 +30,7 @@ window.updateEasygoingSetting = async (key, value) => {
 window.showRestartNotification = (setting, value) => {
     const existing = document.querySelector('.easygoing-notification');
     if (existing) existing.remove();
-    
+
     const notification = document.createElement('div');
     notification.className = 'easygoing-notification';
     notification.style.cssText = `
@@ -44,11 +42,11 @@ window.showRestartNotification = (setting, value) => {
         font-size: 14px; max-width: 350px;
         animation: slideIn 0.4s ease-out;
     `;
-    
+
     const moduleName = setting.replace('enable_', '').replace('_', ' ').toUpperCase();
     const statusText = value ? 'Enabled' : 'Disabled';
     const statusIcon = value ? '⚠️' : '❌';
-    
+
     notification.innerHTML = `
         <div style="display: flex; align-items: center; gap: 12px;">
             <div style="font-size: 24px;">${statusIcon}</div>
@@ -60,13 +58,13 @@ window.showRestartNotification = (setting, value) => {
                     Restart ComfyUI to apply changes
                 </div>
             </div>
-            <button onclick="this.parentElement.parentElement.remove()" 
-                    style="background: rgba(255,255,255,0.2); border: none; color: white; 
-                           width: 28px; height: 28px; border-radius: 50%; cursor: pointer; 
+            <button onclick="this.parentElement.parentElement.remove()"
+                    style="background: rgba(255,255,255,0.2); border: none; color: white;
+                           width: 28px; height: 28px; border-radius: 50%; cursor: pointer;
                            font-size: 16px;">×</button>
         </div>
     `;
-    
+
     document.body.appendChild(notification);
     setTimeout(() => notification.remove(), 5000);
 };
@@ -80,13 +78,13 @@ function waitForComfyUI() {
     }
 }
 
-// 設定項目追加（ヘッダーなし）
+// 設定項目追加（SDXL CLIPのみ）
 function addEasygoingSettings() {
     if (settingsInitialized) return;
-    
+
     try {
         addStyles();
-        
+
         app.ui.settings.addSetting({
             id: "EasygoingNodes.enable_sdxl_clip",
             name: "🔧 Enable SDXL CLIP replacement",
@@ -96,15 +94,6 @@ function addEasygoingSettings() {
             onChange: (value) => window.updateEasygoingSetting("enable_sdxl_clip", value)
         });
 
-        app.ui.settings.addSetting({
-            id: "EasygoingNodes.enable_hidream",
-            name: "🔧 Enable HiDream replacement",
-            type: "boolean",
-            defaultValue: true,
-            tooltip: "Enable custom HiDream text encoder implementation (restart required)",
-            onChange: (value) => window.updateEasygoingSetting("enable_hidream", value)
-        });
-        
         settingsInitialized = true;
         setTimeout(syncInitialSettings, 1000);
     } catch (error) {
@@ -116,16 +105,15 @@ function addEasygoingSettings() {
 async function syncInitialSettings() {
     try {
         const settings = {
-            enable_sdxl_clip: app.ui.settings.getSettingValue?.("EasygoingNodes.enable_sdxl_clip", true),
-            enable_hidream: app.ui.settings.getSettingValue?.("EasygoingNodes.enable_hidream", true)
+            enable_sdxl_clip: app.ui.settings.getSettingValue?.("EasygoingNodes.enable_sdxl_clip", true)
         };
-        
+
         await fetch("/easygoing_nodes/settings", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(settings)
         });
-        
+
         // 初回同期完了フラグを設定
         initialSyncComplete = true;
     } catch (error) {
@@ -137,7 +125,7 @@ async function syncInitialSettings() {
 // CSS追加
 function addStyles() {
     if (document.querySelector('#easygoing-styles')) return;
-    
+
     const style = document.createElement('style');
     style.id = 'easygoing-styles';
     style.textContent = `

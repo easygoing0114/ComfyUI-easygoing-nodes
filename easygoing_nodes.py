@@ -256,6 +256,52 @@ class SaveImageWithPrompt:
 
         return {"ui": {"images": results}}
 
+class CheckpointLoaderSetClipDevice:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "ckpt_name": (folder_paths.get_filename_list("checkpoints"), {
+                    "tooltip": "The name of the checkpoint (model) to load."
+                }),
+                "clip_device": (["default", "cpu"], {
+                    "default": "cpu",
+                    "tooltip": "Device where CLIP model will be loaded. 'cpu' keeps CLIP in CPU memory, 'default' uses the standard device allocation."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "ckpt_name",)
+    OUTPUT_TOOLTIPS = (
+        "The model used for denoising latents.",
+        "The CLIP model used for encoding text prompts.",
+        "The VAE model used for encoding and decoding images to and from latent space.",
+        "The name of the loaded checkpoint."
+    )
+    FUNCTION = "load_checkpoint"
+    CATEGORY = "loaders"
+    DESCRIPTION = "Loads a diffusion model checkpoint with the option to specify CLIP device location. Setting CLIP to CPU can save VRAM."
+
+    def load_checkpoint(self, ckpt_name, clip_device="cpu"):
+        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+
+        # モデルオプションの設定
+        model_options = {}
+        if clip_device == "cpu":
+            model_options["load_device"] = torch.device("cpu")
+            model_options["offload_device"] = torch.device("cpu")
+
+        # チェックポイントのロード
+        out = comfy.sd.load_checkpoint_guess_config(
+            ckpt_path,
+            output_vae=True,
+            output_clip=True,
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            model_options=model_options
+        )
+
+        return out[:3] + (ckpt_name,)
+
 class QuadrupleCLIPLoaderSetDevice:
     @classmethod
     def INPUT_TYPES(s):
@@ -370,51 +416,6 @@ class CLIPVisionLoaderSetDevice:
         # Log the device used for loading
         print(f"CLIP vision model loaded to {load_device}")
         return (clip_vision,)
-
-class CheckpointLoaderSetClipDevice:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "ckpt_name": (folder_paths.get_filename_list("checkpoints"), {
-                    "tooltip": "The name of the checkpoint (model) to load."
-                }),
-                "clip_device": (["default", "cpu"], {
-                    "default": "cpu",
-                    "tooltip": "Device where CLIP model will be loaded. 'cpu' keeps CLIP in CPU memory, 'default' uses the standard device allocation."
-                }),
-            }
-        }
-
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE")
-    OUTPUT_TOOLTIPS = (
-        "The model used for denoising latents.",
-        "The CLIP model used for encoding text prompts.",
-        "The VAE model used for encoding and decoding images to and from latent space."
-    )
-    FUNCTION = "load_checkpoint"
-    CATEGORY = "loaders"
-    DESCRIPTION = "Loads a diffusion model checkpoint with the option to specify CLIP device location. Setting CLIP to CPU can save VRAM."
-
-    def load_checkpoint(self, ckpt_name, clip_device="cpu"):
-        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
-
-        # モデルオプションの設定
-        model_options = {}
-        if clip_device == "cpu":
-            model_options["load_device"] = torch.device("cpu")
-            model_options["offload_device"] = torch.device("cpu")
-
-        # チェックポイントのロード
-        out = comfy.sd.load_checkpoint_guess_config(
-            ckpt_path,
-            output_vae=True,
-            output_clip=True,
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=model_options
-        )
-
-        return out[:3]
 
 class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
     CATEGORY = "advanced/model_merging/model_specific"
@@ -959,7 +960,7 @@ class VAEScaleFluxBlock:
         arg_dict["encoder.conv_in"] = argument
         arg_dict["encoder.conv_out"] = argument
         arg_dict["encoder.norm_out"] = argument
-        
+
         # Encoder down blocks (0-3)
         for i in range(4):
             arg_dict[f"encoder.down.{i}."] = argument
@@ -969,7 +970,7 @@ class VAEScaleFluxBlock:
             # Downsample layers (0-2 have downsample)
             if i < 3:
                 arg_dict[f"encoder.down.{i}.downsample."] = argument
-        
+
         # Encoder middle blocks
         arg_dict["encoder.mid."] = argument
         arg_dict["encoder.mid.block_1."] = argument
@@ -980,7 +981,7 @@ class VAEScaleFluxBlock:
         arg_dict["decoder.conv_in"] = argument
         arg_dict["decoder.conv_out"] = argument
         arg_dict["decoder.norm_out"] = argument
-        
+
         # Decoder up blocks (0-3)
         for i in range(4):
             arg_dict[f"decoder.up.{i}."] = argument
@@ -990,7 +991,7 @@ class VAEScaleFluxBlock:
             # Upsample layers (1-3 have upsample)
             if i > 0:
                 arg_dict[f"decoder.up.{i}.upsample."] = argument
-        
+
         # Decoder middle blocks
         arg_dict["decoder.mid."] = argument
         arg_dict["decoder.mid.block_1."] = argument

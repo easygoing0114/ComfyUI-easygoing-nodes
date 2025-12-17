@@ -13,10 +13,8 @@ Enhanced text encoders and custom nodes for [ComfyUI](https://github.com/comfyan
 Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced versions that include:
 
 - **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
-- (HiDream Text Encoder) – an advanced encoder optimized for CPU efficiency and improved memory management  
-  - Disabled by default because ComfyUI’s built-in `HiDream.py` has been updated.
 
-These replacements can be toggled on or off individually from ComfyUI's settings.
+The replacement can be toggled on or off individually from ComfyUI's settings.
 
 ### 🧩 CLIP Loaders
 
@@ -38,7 +36,7 @@ Includes an option to load the text encoder into RAM and process it on the CPU (
 
 <img width="320" height="374" alt="HDR Effects LAB Adjust node" src="Images/HDREffectsLabAdjust node.png">
 
-**Example**  
+**Example**
 **Left: Original | Right: HDR Processing**
 
 <table>
@@ -48,7 +46,7 @@ Includes an option to load the text encoder into RAM and process it on the CPU (
   </tr>
 </table>
 
-Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.  
+Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.
 💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
 
 ### 🧬 ModelMergeHiDream
@@ -75,7 +73,6 @@ git clone https://github.com/easygoing0114/ComfyUI-easygoing-nodes.git
 2. For enhanced CLIP/Text Encoder functionality, ensure the modified modules are in place:
    - The enhanced modules are located in `modified_modules/` directory
    - `sdxl_clip.py` - Enhanced SDXL CLIP implementation
-   - `hidream.py` - Enhanced HiDream text encoder implementation
 
 3. Restart ComfyUI. The new nodes should now appear in the node search.
 
@@ -83,9 +80,8 @@ git clone https://github.com/easygoing0114/ComfyUI-easygoing-nodes.git
 
 When ComfyUI starts with this custom node, you should see messages like:
 ```
-EasygoingNodes settings loaded: {'enable_sdxl_clip': True, 'enable_hidream': False}
+EasygoingNodes settings loaded: {'enable_sdxl_clip': True}
 ✓ Applied module replacements: sdxl_clip
-⊘ Skipped module replacements: hidream
 ```
 
 If you don't see these messages, check that the `modified_modules/` directory contains the necessary files.
@@ -100,6 +96,10 @@ This project is licensed under the [MIT License](LICENSE).
 - HDR Effects based on [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts)
 
 ## Update History
+
+### 2025.12.18
+
+- deleted `hidream.py` replace function
 
 ### 2025.12.1
 
