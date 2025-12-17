@@ -99,7 +99,6 @@ def apply_to_batch(func):
         return (torch.cat(images, dim=0),)
     return wrapper
 
-# Custom node: HDREffectsLabAdjusts
 class HDREffectsLabAdjust:
     DESCRIPTION = "Apply HDR tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB A/B channel adjustments with blend strength."
 
@@ -178,7 +177,6 @@ class HDREffectsLabAdjust:
 
         return pil2tensor(color_adjusted)
 
-# Custom node: SaveImageWithPrompt
 class SaveImageWithPrompt:
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
@@ -271,7 +269,8 @@ class CheckpointLoaderSetClipDevice:
             }
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "ckpt_name",)
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "STRING")
+    RETURN_NAMES = ("MODEL", "CLIP", "VAE", "ckpt_name")
     OUTPUT_TOOLTIPS = (
         "The model used for denoising latents.",
         "The CLIP model used for encoding text prompts.",
