@@ -99,7 +99,7 @@ This project is licensed under the [MIT License](LICENSE).
 
 ### 2025.12.18
 
-- deleted `hidream.py` replace function
+- Deleted `hidream.py` replace function
 
 ### 2025.12.1
 
