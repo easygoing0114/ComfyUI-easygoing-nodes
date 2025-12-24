@@ -15,34 +15,54 @@ import comfy_extras.nodes_model_merging
 sRGB_profile = ImageCms.createProfile("sRGB")
 Lab_profile = ImageCms.createProfile("LAB")
 
+
 # Helper functions
 def tensor2pil(image):
-    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+    return Image.fromarray(
+        np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+    )
+
 
 def pil2tensor(image):
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
 
 def adjust_shadows_non_linear(luminance, shadow_intensity, max_shadow_adjustment=1.5):
     lum_array = np.array(luminance, dtype=np.float32) / 255.0
     shadows = lum_array ** (1 / (1 + shadow_intensity * max_shadow_adjustment))
     return np.clip(shadows * 255, 0, 255).astype(np.uint8)
 
-def adjust_highlights_non_linear(luminance, highlight_intensity, max_highlight_adjustment=1.5):
+
+def adjust_highlights_non_linear(
+    luminance, highlight_intensity, max_highlight_adjustment=1.5
+):
     lum_array = np.array(luminance, dtype=np.float32) / 255.0
-    highlights = 1 - (1 - lum_array) ** (1 + highlight_intensity * max_highlight_adjustment)
+    highlights = 1 - (1 - lum_array) ** (
+        1 + highlight_intensity * max_highlight_adjustment
+    )
     return np.clip(highlights * 255, 0, 255).astype(np.uint8)
 
-def merge_adjustments_with_blend_modes(luminance, shadows, highlights, hdr_intensity, shadow_intensity, highlight_intensity):
+
+def merge_adjustments_with_blend_modes(
+    luminance, shadows, highlights, hdr_intensity, shadow_intensity, highlight_intensity
+):
     base = np.array(luminance, dtype=np.float32)
-    scaled_shadow_intensity = shadow_intensity ** 2 * hdr_intensity
-    scaled_highlight_intensity = highlight_intensity ** 2 * hdr_intensity
+    scaled_shadow_intensity = shadow_intensity**2 * hdr_intensity
+    scaled_highlight_intensity = highlight_intensity**2 * hdr_intensity
     shadow_mask = np.clip((1 - (base / 255)) ** 2, 0, 1)
     highlight_mask = np.clip((base / 255) ** 2, 0, 1)
-    adjusted_shadows = np.clip(base * (1 - shadow_mask * scaled_shadow_intensity), 0, 255)
-    adjusted_highlights = np.clip(base + (255 - base) * highlight_mask * scaled_highlight_intensity, 0, 255)
+    adjusted_shadows = np.clip(
+        base * (1 - shadow_mask * scaled_shadow_intensity), 0, 255
+    )
+    adjusted_highlights = np.clip(
+        base + (255 - base) * highlight_mask * scaled_highlight_intensity, 0, 255
+    )
     adjusted_luminance = np.clip(adjusted_shadows + adjusted_highlights - base, 0, 255)
-    final_luminance = np.clip(base * (1 - hdr_intensity) + adjusted_luminance * hdr_intensity, 0, 255).astype(np.uint8)
+    final_luminance = np.clip(
+        base * (1 - hdr_intensity) + adjusted_luminance * hdr_intensity, 0, 255
+    ).astype(np.uint8)
     return Image.fromarray(final_luminance)
+
 
 def apply_gamma_correction(lum_array, gamma):
     if gamma == 0:
@@ -51,6 +71,7 @@ def apply_gamma_correction(lum_array, gamma):
     gamma_corrected = 1 / (1.1 - gamma)
     adjusted = 255 * ((lum_array / 255) ** gamma_corrected)
     return np.clip(adjusted, 0, 255).astype(np.uint8)
+
 
 def apply_midtone_weight(values, adjustment_strength):
     """
@@ -73,6 +94,7 @@ def apply_midtone_weight(values, adjustment_strength):
 
     return np.clip(adjusted_values, 0, 255).astype(np.uint8)
 
+
 def blend_ab_channels(original_a, original_b, adjusted_a, adjusted_b, ab_strength):
     """
     元のA/Bチャンネルと調整後のA/Bチャンネルを指定した強度でブレンドする
@@ -93,11 +115,14 @@ def blend_ab_channels(original_a, original_b, adjusted_a, adjusted_b, ab_strengt
 
     return Image.fromarray(blended_a), Image.fromarray(blended_b)
 
+
 def apply_to_batch(func):
     def wrapper(self, image, *args, **kwargs):
         images = [func(self, img, *args, **kwargs) for img in image]
         return (torch.cat(images, dim=0),)
+
     return wrapper
+
 
 class HDREffectsLabAdjust:
     DESCRIPTION = "Apply HDR tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB A/B channel adjustments with blend strength."
@@ -105,33 +130,72 @@ class HDREffectsLabAdjust:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            'required': {
-                'image': ('IMAGE',),
-                'hdr_intensity': ('FLOAT', {'default': 0.75, 'min': 0.0, 'max': 5.0, 'step': 0.01}),
-                'shadow_intensity': ('FLOAT', {'default': 0.75, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'highlight_intensity': ('FLOAT', {'default': 0.25, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'gamma_intensity': ('FLOAT', {'default': 0.0, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
-                'ab_strength': ('FLOAT', {'default': 0.1, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'a_adjustment': ('FLOAT', {'default': 0.03, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
-                'b_adjustment': ('FLOAT', {'default': -0.05, 'min': -1.0, 'max': 1.0, 'step': 0.01}),
-                'contrast': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
-                'enhance_color': ('FLOAT', {'default': 0.03, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+            "required": {
+                "image": ("IMAGE",),
+                "hdr_intensity": (
+                    "FLOAT",
+                    {"default": 0.75, "min": 0.0, "max": 5.0, "step": 0.01},
+                ),
+                "shadow_intensity": (
+                    "FLOAT",
+                    {"default": 0.75, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "highlight_intensity": (
+                    "FLOAT",
+                    {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "gamma_intensity": (
+                    "FLOAT",
+                    {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01},
+                ),
+                "ab_strength": (
+                    "FLOAT",
+                    {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "a_adjustment": (
+                    "FLOAT",
+                    {"default": 0.03, "min": -1.0, "max": 1.0, "step": 0.01},
+                ),
+                "b_adjustment": (
+                    "FLOAT",
+                    {"default": -0.05, "min": -1.0, "max": 1.0, "step": 0.01},
+                ),
+                "contrast": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "enhance_color": (
+                    "FLOAT",
+                    {"default": 0.03, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
             }
         }
 
-    RETURN_TYPES = ('IMAGE',)
-    RETURN_NAMES = ('result_img',)
-    FUNCTION = 'apply_hdr2'
-    CATEGORY = 'SuperBeastsAI/Image'
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("result_img",)
+    FUNCTION = "apply_hdr2"
+    CATEGORY = "SuperBeastsAI/Image"
 
     @apply_to_batch
-    def apply_hdr2(self, image, hdr_intensity=0.75, shadow_intensity=0.75, highlight_intensity=0.25,
-                   ab_strength=0.1, a_adjustment=0.03, b_adjustment=-0.05,
-                   gamma_intensity=0, contrast=0.1, enhance_color=0.25):
+    def apply_hdr2(
+        self,
+        image,
+        hdr_intensity=0.75,
+        shadow_intensity=0.75,
+        highlight_intensity=0.25,
+        ab_strength=0.1,
+        a_adjustment=0.03,
+        b_adjustment=-0.05,
+        gamma_intensity=0,
+        contrast=0.1,
+        enhance_color=0.25,
+    ):
         img = tensor2pil(image)
 
         # Convert to LAB
-        img_lab = ImageCms.profileToProfile(img, sRGB_profile, Lab_profile, outputMode='LAB')
+        img_lab = ImageCms.profileToProfile(
+            img, sRGB_profile, Lab_profile, outputMode="LAB"
+        )
         luminance, a, b = img_lab.split()
 
         # Convert to NumPy arrays
@@ -153,29 +217,46 @@ class HDREffectsLabAdjust:
         b_adjusted_temp = Image.fromarray(adjusted_b_array.astype(np.uint8))
 
         # Blend original and adjusted A/B channels using ab_strength
-        a_adjusted, b_adjusted = blend_ab_channels(a, b, a_adjusted_temp, b_adjusted_temp, ab_strength)
+        a_adjusted, b_adjusted = blend_ab_channels(
+            a, b, a_adjusted_temp, b_adjusted_temp, ab_strength
+        )
 
         # Apply HDR adjustments
         shadows_adjusted = adjust_shadows_non_linear(luminance, shadow_intensity)
-        highlights_adjusted = adjust_highlights_non_linear(luminance, highlight_intensity)
-        merged_adjustments = merge_adjustments_with_blend_modes(lum_array, shadows_adjusted, highlights_adjusted,
-                                                               hdr_intensity, shadow_intensity, highlight_intensity)
+        highlights_adjusted = adjust_highlights_non_linear(
+            luminance, highlight_intensity
+        )
+        merged_adjustments = merge_adjustments_with_blend_modes(
+            lum_array,
+            shadows_adjusted,
+            highlights_adjusted,
+            hdr_intensity,
+            shadow_intensity,
+            highlight_intensity,
+        )
 
         # Apply gamma correction
-        gamma_corrected = apply_gamma_correction(np.array(merged_adjustments), gamma_intensity)
+        gamma_corrected = apply_gamma_correction(
+            np.array(merged_adjustments), gamma_intensity
+        )
         gamma_corrected = Image.fromarray(gamma_corrected).resize(a.size)
 
         # Merge LAB channels
-        adjusted_lab = Image.merge('LAB', (gamma_corrected, a_adjusted, b_adjusted))
+        adjusted_lab = Image.merge("LAB", (gamma_corrected, a_adjusted, b_adjusted))
 
         # Convert back to RGB
-        img_adjusted = ImageCms.profileToProfile(adjusted_lab, Lab_profile, sRGB_profile, outputMode='RGB')
+        img_adjusted = ImageCms.profileToProfile(
+            adjusted_lab, Lab_profile, sRGB_profile, outputMode="RGB"
+        )
 
         # Enhance contrast and color
         contrast_adjusted = ImageEnhance.Contrast(img_adjusted).enhance(1 + contrast)
-        color_adjusted = ImageEnhance.Color(contrast_adjusted).enhance(1 + enhance_color * 0.2)
+        color_adjusted = ImageEnhance.Color(contrast_adjusted).enhance(
+            1 + enhance_color * 0.2
+        )
 
         return pil2tensor(color_adjusted)
+
 
 class SaveImageWithPrompt:
     def __init__(self):
@@ -188,12 +269,19 @@ class SaveImageWithPrompt:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "images": ("IMAGE", ),
+                "images": ("IMAGE",),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
                 "positive_prompt": ("STRING", {"default": ""}),
                 "negative_prompt": ("STRING", {"default": ""}),
                 "caption": ("STRING", {"default": ""}),
-                "numbers": ("BOOLEAN", {"default": True, "label_on": "Include Numbers", "label_off": "No Numbers"}),
+                "numbers": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "label_on": "Include Numbers",
+                        "label_off": "No Numbers",
+                    },
+                ),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -204,17 +292,31 @@ class SaveImageWithPrompt:
     CATEGORY = "image"
     DESCRIPTION = "Saves images to your ComfyUI output directory with positive and negative prompts and caption in metadata."
 
-    def save_images(self, images, filename_prefix="ComfyUI", positive_prompt="", negative_prompt="", caption="", numbers=True, prompt=None, extra_pnginfo=None):
+    def save_images(
+        self,
+        images,
+        filename_prefix="ComfyUI",
+        positive_prompt="",
+        negative_prompt="",
+        caption="",
+        numbers=True,
+        prompt=None,
+        extra_pnginfo=None,
+    ):
         # Truncate filename_prefix to 200 characters if it exceeds that length
         if len(filename_prefix) > 180:
             filename_prefix = filename_prefix[:180]
 
         filename_prefix += self.prefix_append
-        full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])
+        full_output_folder, filename, counter, subfolder, filename_prefix = (
+            folder_paths.get_save_image_path(
+                filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
+            )
+        )
         results = list()
 
-        for (batch_number, image) in enumerate(images):
-            i = 255. * image.cpu().numpy()
+        for batch_number, image in enumerate(images):
+            i = 255.0 * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
             metadata = None
             if not args.disable_metadata:
@@ -244,28 +346,35 @@ class SaveImageWithPrompt:
             else:
                 file = f"{filename_with_batch_num}.png"
 
-            img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=self.compress_level)
-            results.append({
-                "filename": file,
-                "subfolder": subfolder,
-                "type": self.type
-            })
+            img.save(
+                os.path.join(full_output_folder, file),
+                pnginfo=metadata,
+                compress_level=self.compress_level,
+            )
+            results.append(
+                {"filename": file, "subfolder": subfolder, "type": self.type}
+            )
             counter += 1
 
         return {"ui": {"images": results}}
+
 
 class CheckpointLoaderSetClipDevice:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "ckpt_name": (folder_paths.get_filename_list("checkpoints"), {
-                    "tooltip": "The name of the checkpoint (model) to load."
-                }),
-                "clip_device": (["default", "cpu"], {
-                    "default": "cpu",
-                    "tooltip": "Device where CLIP model will be loaded. 'cpu' keeps CLIP in CPU memory, 'default' uses the standard device allocation."
-                }),
+                "ckpt_name": (
+                    folder_paths.get_filename_list("checkpoints"),
+                    {"tooltip": "The name of the checkpoint (model) to load."},
+                ),
+                "clip_device": (
+                    ["default", "cpu"],
+                    {
+                        "default": "cpu",
+                        "tooltip": "Device where CLIP model will be loaded. 'cpu' keeps CLIP in CPU memory, 'default' uses the standard device allocation.",
+                    },
+                ),
             }
         }
 
@@ -275,7 +384,7 @@ class CheckpointLoaderSetClipDevice:
         "The model used for denoising latents.",
         "The CLIP model used for encoding text prompts.",
         "The VAE model used for encoding and decoding images to and from latent space.",
-        "The name of the loaded checkpoint."
+        "The name of the loaded checkpoint.",
     )
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders"
@@ -296,32 +405,37 @@ class CheckpointLoaderSetClipDevice:
             output_vae=True,
             output_clip=True,
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=model_options
+            model_options=model_options,
         )
 
         return out[:3] + (ckpt_name,)
+
 
 class QuadrupleCLIPLoaderSetDevice:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "clip_name1": (folder_paths.get_filename_list("text_encoders"), ),
-                "clip_name2": (folder_paths.get_filename_list("text_encoders"), ),
-                "clip_name3": (folder_paths.get_filename_list("text_encoders"), ),
-                "clip_name4": (folder_paths.get_filename_list("text_encoders"), ),
+                "clip_name1": (folder_paths.get_filename_list("text_encoders"),),
+                "clip_name2": (folder_paths.get_filename_list("text_encoders"),),
+                "clip_name3": (folder_paths.get_filename_list("text_encoders"),),
+                "clip_name4": (folder_paths.get_filename_list("text_encoders"),),
             },
             "optional": {
                 "device": (["default", "cpu"], {"advanced": True}),
-            }
+            },
         }
 
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
     CATEGORY = "advanced/loaders"
-    DESCRIPTION = "[Recipes]\n\nhidream: long clip-l, long clip-g, t5xxl, llama_8b_3.1_instruct"
+    DESCRIPTION = (
+        "[Recipes]\n\nhidream: long clip-l, long clip-g, t5xxl, llama_8b_3.1_instruct"
+    )
 
-    def load_clip(self, clip_name1, clip_name2, clip_name3, clip_name4, device="default"):
+    def load_clip(
+        self, clip_name1, clip_name2, clip_name3, clip_name4, device="default"
+    ):
         clip_path1 = folder_paths.get_full_path_or_raise("text_encoders", clip_name1)
         clip_path2 = folder_paths.get_full_path_or_raise("text_encoders", clip_name2)
         clip_path3 = folder_paths.get_full_path_or_raise("text_encoders", clip_name3)
@@ -329,27 +443,30 @@ class QuadrupleCLIPLoaderSetDevice:
 
         model_options = {}
         if device == "cpu":
-            model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
+            model_options["load_device"] = model_options["offload_device"] = (
+                torch.device("cpu")
+            )
 
         clip = comfy.sd.load_clip(
             ckpt_paths=[clip_path1, clip_path2, clip_path3, clip_path4],
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=model_options
+            model_options=model_options,
         )
         return (clip,)
+
 
 class TripleCLIPLoaderSetDevice:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "clip_name1": (folder_paths.get_filename_list("text_encoders"), ),
-                "clip_name2": (folder_paths.get_filename_list("text_encoders"), ),
-                "clip_name3": (folder_paths.get_filename_list("text_encoders"), ),
+                "clip_name1": (folder_paths.get_filename_list("text_encoders"),),
+                "clip_name2": (folder_paths.get_filename_list("text_encoders"),),
+                "clip_name3": (folder_paths.get_filename_list("text_encoders"),),
             },
             "optional": {
                 "device": (["default", "cpu"], {"advanced": True}),
-            }
+            },
         }
 
     RETURN_TYPES = ("CLIP",)
@@ -363,24 +480,27 @@ class TripleCLIPLoaderSetDevice:
         clip_path3 = folder_paths.get_full_path_or_raise("text_encoders", clip_name3)
         model_options = {}
         if device == "cpu":
-            model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
+            model_options["load_device"] = model_options["offload_device"] = (
+                torch.device("cpu")
+            )
         clip = comfy.sd.load_clip(
             ckpt_paths=[clip_path1, clip_path2, clip_path3],
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=model_options
+            model_options=model_options,
         )
         return (clip,)
+
 
 class CLIPVisionLoaderSetDevice:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "clip_name": (folder_paths.get_filename_list("clip_vision"), ),
+                "clip_name": (folder_paths.get_filename_list("clip_vision"),),
             },
             "optional": {
                 "device": (["default", "cpu"], {"advanced": True}),
-            }
+            },
         }
 
     RETURN_TYPES = ("CLIP_VISION",)
@@ -403,7 +523,9 @@ class CLIPVisionLoaderSetDevice:
         # Load the CLIP vision model
         clip_vision = comfy.clip_vision.load(clip_path)
         if clip_vision is None:
-            raise RuntimeError("Error: CLIP vision file is invalid and does not contain a valid vision model.")
+            raise RuntimeError(
+                "Error: CLIP vision file is invalid and does not contain a valid vision model."
+            )
 
         # Update ModelPatcher device settings
         clip_vision.patcher.load_device = load_device
@@ -416,14 +538,14 @@ class CLIPVisionLoaderSetDevice:
         print(f"CLIP vision model loaded to {load_device}")
         return (clip_vision,)
 
+
 class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
     CATEGORY = "advanced/model_merging/model_specific"
     DESCRIPTION = "Merge node for HiDream series models (Full, Dev, Fast). Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31 based on provided keys."
 
     @classmethod
     def INPUT_TYPES(s):
-        arg_dict = { "model1": ("MODEL",),
-                              "model2": ("MODEL",)}
+        arg_dict = {"model1": ("MODEL",), "model2": ("MODEL",)}
 
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
 
@@ -439,11 +561,84 @@ class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
 
         return {"required": arg_dict}
 
+
+class ModelScaleQwenImage:
+    """
+    Qwen Image Modelの特定の層をスケーリングするノード。
+    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {"model": ("MODEL",)}
+
+        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0程度に設定）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        # 基本コンポーネント
+        arg_dict["pos_embeds."] = argument
+        arg_dict["img_in."] = argument
+        arg_dict["txt_norm."] = argument
+        arg_dict["txt_in."] = argument
+        arg_dict["time_text_embed."] = argument
+
+        # Transformer Block (0-59)
+        for i in range(60):
+            arg_dict["transformer_blocks.{}.".format(i)] = argument
+
+        arg_dict["proj_out."] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    def scale(self, model, **kwargs):
+        # モデルの複製
+        m = model.clone()
+
+        # スケーリング比率の辞書（'model'キー以外を抽出）
+        ratios = {k: v for k, v in kwargs.items() if k != "model"}
+
+        # モデルのパッチ可能なキー（重み）を取得
+        # diffusion_model 以下のパラメータを対象とする
+        kp = m.get_key_patches("diffusion_model.")
+
+        # 全ての重みキーに対してスケーリングを適用
+        for k in kp:
+            scale_value = 1.0
+            # diffusion_model. を除いた純粋なレイヤー名
+            k_unet = k[len("diffusion_model.") :]
+
+            # 最も長く一致するプレフィックスを探すロジック（ModelMergeBlocks参照）
+            matched_arg_len = 0
+            for arg_name, arg_value in ratios.items():
+                if k_unet.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale_value = arg_value
+                        matched_arg_len = len(arg_name)
+
+            # スケーリングの適用
+            # ComfyUIのadd_patchesは (patch, strength_patch, strength_model) を計算する
+            # Output = W * strength_model + P * strength_patch
+            # スケーリングを行うため: W_new = W * scale_value としたい
+            # ここでは W * 1.0 + W * (scale_value - 1.0) として実装する
+            if scale_value != 1.0:
+                # kp[k] は (tensor,) のタプル
+                weight_tensor = kp[k][0]
+                # 元の重みに対して (scale - 1.0) 分をパッチとして追加することで乗算を実現
+                m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
+
+        return (m,)
+
+
 class CLIPScaleDualSDXLBlock:
     """
     SDXL DualCLIP（CLIP-L + CLIP-G）の特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
     """
+
     @classmethod
     def INPUT_TYPES(s):
         arg_dict = {
@@ -501,7 +696,7 @@ class CLIPScaleDualSDXLBlock:
             # SDXLの内部キーは "clip_l.transformer.text_model.encoder..." のように長いため
             # ユーザー引数 ("clip_l.encoder...") とマッチするように正規化します
             normalized_key = key.replace(".transformer.text_model.", ".")
-            normalized_key = normalized_key.replace(".text_model.", ".") # 念のため
+            normalized_key = normalized_key.replace(".text_model.", ".")  # 念のため
 
             target_scale = 1.0
 
@@ -536,11 +731,13 @@ class CLIPScaleDualSDXLBlock:
 
         return (m,)
 
+
 class CLIPScaleQwenBlock:
     """
     Qwen-2.5-VL-7B CLIPの特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
     """
+
     @classmethod
     def INPUT_TYPES(s):
         arg_dict = {
@@ -599,7 +796,7 @@ class CLIPScaleQwenBlock:
             # "transformer." プレフィックスを除去（ある場合）
             normalized_key = key
             if normalized_key.startswith("transformer."):
-                normalized_key = normalized_key[len("transformer."):]
+                normalized_key = normalized_key[len("transformer.") :]
 
             target_scale = 1.0
             matched_arg_len = 0
@@ -610,7 +807,10 @@ class CLIPScaleQwenBlock:
                     # より長くマッチする場合のみ更新
                     # "model.layers.1" と "model.layers.10" の誤爆を防ぐ
                     next_char_idx = len(arg_name)
-                    if next_char_idx == len(normalized_key) or normalized_key[next_char_idx] == '.':
+                    if (
+                        next_char_idx == len(normalized_key)
+                        or normalized_key[next_char_idx] == "."
+                    ):
                         if len(arg_name) > matched_arg_len:
                             target_scale = scale_val
                             matched_arg_len = len(arg_name)
@@ -631,6 +831,7 @@ class CLIPScaleQwenBlock:
             m.add_patches(patches, scale_val, 0.0)
 
         return (m,)
+
 
 class CLIPSaveQwen:
     def __init__(self):
@@ -682,7 +883,7 @@ class CLIPSaveQwen:
             if k.startswith(prefix_to_strip):
                 # プレフィックスを削除したキー名にする
                 # 例: qwen25_7b.transformer.model.layers.0... -> model.layers.0...
-                new_key = k[len(prefix_to_strip):]
+                new_key = k[len(prefix_to_strip) :]
                 output_sd[new_key] = v
             elif k.startswith("qwen25_7b."):
                 # logit_scaleなどの例外処理
@@ -693,8 +894,9 @@ class CLIPSaveQwen:
                 output_sd[k] = v
 
         # ファイルパスの生成
-        full_output_folder, filename, counter, subfolder, filename_prefix = \
+        full_output_folder, filename, counter, subfolder, filename_prefix = (
             folder_paths.get_save_image_path(filename_prefix, self.output_dir)
+        )
 
         output_checkpoint = f"{filename}_{counter:05}_.safetensors"
         output_checkpoint = os.path.join(full_output_folder, output_checkpoint)
@@ -704,14 +906,20 @@ class CLIPSaveQwen:
 
         return {}
 
+
 class VAEMergeSimple:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {
-            "vae1": ("VAE",),
-            "vae2": ("VAE",),
-            "ratio": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-        }}
+        return {
+            "required": {
+                "vae1": ("VAE",),
+                "vae2": ("VAE",),
+                "ratio": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+            }
+        }
 
     RETURN_TYPES = ("VAE",)
     FUNCTION = "merge"
@@ -735,11 +943,16 @@ class VAEMergeSimple:
 class VAEMergeSubtract:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {
-            "vae1": ("VAE",),
-            "vae2": ("VAE",),
-            "multiplier": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-        }}
+        return {
+            "required": {
+                "vae1": ("VAE",),
+                "vae2": ("VAE",),
+                "multiplier": (
+                    "FLOAT",
+                    {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01},
+                ),
+            }
+        }
 
     RETURN_TYPES = ("VAE",)
     FUNCTION = "merge"
@@ -759,13 +972,16 @@ class VAEMergeSubtract:
         merged_vae = comfy.sd.VAE(sd=merged_sd)
         return (merged_vae,)
 
+
 class VAEMergeAdd:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {
-            "vae1": ("VAE",),
-            "vae2": ("VAE",),
-        }}
+        return {
+            "required": {
+                "vae1": ("VAE",),
+                "vae2": ("VAE",),
+            }
+        }
 
     RETURN_TYPES = ("VAE",)
     FUNCTION = "merge"
@@ -785,11 +1001,13 @@ class VAEMergeAdd:
         merged_vae = comfy.sd.VAE(sd=merged_sd)
         return (merged_vae,)
 
+
 class VAEScaleSDXLBlock:
     """
     SDXL VAEの特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
     """
+
     @classmethod
     def INPUT_TYPES(s):
         arg_dict = {
@@ -867,6 +1085,7 @@ class VAEMergeSDXLBlock:
     2つのSDXL VAEをブロック単位でマージするノード
     ratio=1.0 で vae2 を使用、ratio=0.0 で vae1 を使用
     """
+
     @classmethod
     def INPUT_TYPES(s):
         arg_dict = {
@@ -906,7 +1125,9 @@ class VAEMergeSDXLBlock:
     FUNCTION = "merge"
     CATEGORY = "advanced/model_merging/model_specific"
 
-    DESCRIPTION = "Block-wise merging for SDXL VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2."
+    DESCRIPTION = (
+        "Block-wise merging for SDXL VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2."
+    )
 
     def merge(self, vae1, vae2, **kwargs):
         import torch
@@ -942,11 +1163,13 @@ class VAEMergeSDXLBlock:
 
         return (new_vae,)
 
+
 class VAEScaleFluxBlock:
     """
     FLUX1 VAEの特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
     """
+
     @classmethod
     def INPUT_TYPES(s):
         arg_dict = {
@@ -1034,11 +1257,13 @@ class VAEScaleFluxBlock:
 
         return (new_vae,)
 
+
 class VAEScaleQwenBlock:
     """
     Qwen Image VAEの特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
     """
+
     @classmethod
     def INPUT_TYPES(s):
         arg_dict = {
@@ -1116,6 +1341,7 @@ class VAEScaleQwenBlock:
 
         return (new_vae,)
 
+
 NODE_CLASS_MAPPINGS = {
     "HDR Effects with LAB Adjust": HDREffectsLabAdjust,
     "SaveImageWithPrompt": SaveImageWithPrompt,
@@ -1124,6 +1350,7 @@ NODE_CLASS_MAPPINGS = {
     "CLIPVisionLoaderSetDevice": CLIPVisionLoaderSetDevice,
     "CheckpointLoaderSetClipDevice": CheckpointLoaderSetClipDevice,
     "ModelMergeHiDream": ModelMergeHiDream,
+    "ModelScaleQwenImage": ModelScaleQwenImage,
     "CLIPScaleDualSDXLBlock": CLIPScaleDualSDXLBlock,
     "CLIPScaleQwenBlock": CLIPScaleQwenBlock,
     "CLIPSaveQwen": CLIPSaveQwen,
@@ -1137,13 +1364,14 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    'HDREffectsLabAdjust': 'HDR Effects with LAB Adjusts',
+    "HDREffectsLabAdjust": "HDR Effects with LAB Adjusts",
     "SaveImageWithPrompt": "Save Image With Prompt",
     "QuadrupleCLIPLoaderSetDevice": "Quadruple CLIP Loader (Set Device)",
     "TripleCLIPLoaderSetDevice": "Triple CLIP Loader (Set Device)",
     "CLIPVisionLoaderSetDevice": "Load CLIP Vision (Set Device)",
     "CheckpointLoaderSetClipDevice": "Checkpoint Loader (Set CLIP Device)",
     "ModelMergeHiDream": "Model Merge HiDream",
+    "ModelScaleQwenImage": "Model Scale Qwen Image",
     "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
     "CLIPScaleQwenBlock": "CLIP Scale Qwen Block",
     "CLIPSaveQwen": "CLIP Save Qwen (Fix Prefix)",
