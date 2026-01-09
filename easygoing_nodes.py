@@ -7,8 +7,6 @@ from PIL.PngImagePlugin import PngInfo
 import folder_paths
 import comfy.sd
 from comfy.cli_args import args
-import comfy.clip_vision
-import comfy.model_management
 import comfy_extras.nodes_model_merging
 
 # LAB color space profiles
@@ -357,186 +355,6 @@ class SaveImageWithPrompt:
             counter += 1
 
         return {"ui": {"images": results}}
-
-
-class CheckpointLoaderSetClipDevice:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "ckpt_name": (
-                    folder_paths.get_filename_list("checkpoints"),
-                    {"tooltip": "The name of the checkpoint (model) to load."},
-                ),
-                "clip_device": (
-                    ["default", "cpu"],
-                    {
-                        "default": "cpu",
-                        "tooltip": "Device where CLIP model will be loaded. 'cpu' keeps CLIP in CPU memory, 'default' uses the standard device allocation.",
-                    },
-                ),
-            }
-        }
-
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "STRING")
-    RETURN_NAMES = ("MODEL", "CLIP", "VAE", "ckpt_name")
-    OUTPUT_TOOLTIPS = (
-        "The model used for denoising latents.",
-        "The CLIP model used for encoding text prompts.",
-        "The VAE model used for encoding and decoding images to and from latent space.",
-        "The name of the loaded checkpoint.",
-    )
-    FUNCTION = "load_checkpoint"
-    CATEGORY = "loaders"
-    DESCRIPTION = "Loads a diffusion model checkpoint with the option to specify CLIP device location. Setting CLIP to CPU can save VRAM."
-
-    def load_checkpoint(self, ckpt_name, clip_device="cpu"):
-        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
-
-        # モデルオプションの設定
-        model_options = {}
-        if clip_device == "cpu":
-            model_options["load_device"] = torch.device("cpu")
-            model_options["offload_device"] = torch.device("cpu")
-
-        # チェックポイントのロード
-        out = comfy.sd.load_checkpoint_guess_config(
-            ckpt_path,
-            output_vae=True,
-            output_clip=True,
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=model_options,
-        )
-
-        return out[:3] + (ckpt_name,)
-
-
-class QuadrupleCLIPLoaderSetDevice:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "clip_name1": (folder_paths.get_filename_list("text_encoders"),),
-                "clip_name2": (folder_paths.get_filename_list("text_encoders"),),
-                "clip_name3": (folder_paths.get_filename_list("text_encoders"),),
-                "clip_name4": (folder_paths.get_filename_list("text_encoders"),),
-            },
-            "optional": {
-                "device": (["default", "cpu"], {"advanced": True}),
-            },
-        }
-
-    RETURN_TYPES = ("CLIP",)
-    FUNCTION = "load_clip"
-    CATEGORY = "advanced/loaders"
-    DESCRIPTION = (
-        "[Recipes]\n\nhidream: long clip-l, long clip-g, t5xxl, llama_8b_3.1_instruct"
-    )
-
-    def load_clip(
-        self, clip_name1, clip_name2, clip_name3, clip_name4, device="default"
-    ):
-        clip_path1 = folder_paths.get_full_path_or_raise("text_encoders", clip_name1)
-        clip_path2 = folder_paths.get_full_path_or_raise("text_encoders", clip_name2)
-        clip_path3 = folder_paths.get_full_path_or_raise("text_encoders", clip_name3)
-        clip_path4 = folder_paths.get_full_path_or_raise("text_encoders", clip_name4)
-
-        model_options = {}
-        if device == "cpu":
-            model_options["load_device"] = model_options["offload_device"] = (
-                torch.device("cpu")
-            )
-
-        clip = comfy.sd.load_clip(
-            ckpt_paths=[clip_path1, clip_path2, clip_path3, clip_path4],
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=model_options,
-        )
-        return (clip,)
-
-
-class TripleCLIPLoaderSetDevice:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "clip_name1": (folder_paths.get_filename_list("text_encoders"),),
-                "clip_name2": (folder_paths.get_filename_list("text_encoders"),),
-                "clip_name3": (folder_paths.get_filename_list("text_encoders"),),
-            },
-            "optional": {
-                "device": (["default", "cpu"], {"advanced": True}),
-            },
-        }
-
-    RETURN_TYPES = ("CLIP",)
-    FUNCTION = "load_clip"
-    CATEGORY = "advanced/loaders"
-    DESCRIPTION = "[Recipes]\n\nsd3: clip-l, clip-g, t5"
-
-    def load_clip(self, clip_name1, clip_name2, clip_name3, device="default"):
-        clip_path1 = folder_paths.get_full_path_or_raise("text_encoders", clip_name1)
-        clip_path2 = folder_paths.get_full_path_or_raise("text_encoders", clip_name2)
-        clip_path3 = folder_paths.get_full_path_or_raise("text_encoders", clip_name3)
-        model_options = {}
-        if device == "cpu":
-            model_options["load_device"] = model_options["offload_device"] = (
-                torch.device("cpu")
-            )
-        clip = comfy.sd.load_clip(
-            ckpt_paths=[clip_path1, clip_path2, clip_path3],
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=model_options,
-        )
-        return (clip,)
-
-
-class CLIPVisionLoaderSetDevice:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "clip_name": (folder_paths.get_filename_list("clip_vision"),),
-            },
-            "optional": {
-                "device": (["default", "cpu"], {"advanced": True}),
-            },
-        }
-
-    RETURN_TYPES = ("CLIP_VISION",)
-    FUNCTION = "load_clip"
-    CATEGORY = "advanced/loaders"
-    DESCRIPTION = "Loads a CLIP vision model and sets the device (default or CPU)."
-
-    def load_clip(self, clip_name, device="default"):
-        # Get the full path of the CLIP vision model
-        clip_path = folder_paths.get_full_path_or_raise("clip_vision", clip_name)
-
-        # Set device configuration
-        if device == "cpu":
-            load_device = torch.device("cpu")
-            offload_device = torch.device("cpu")
-        else:
-            load_device = comfy.model_management.text_encoder_device()
-            offload_device = comfy.model_management.text_encoder_offload_device()
-
-        # Load the CLIP vision model
-        clip_vision = comfy.clip_vision.load(clip_path)
-        if clip_vision is None:
-            raise RuntimeError(
-                "Error: CLIP vision file is invalid and does not contain a valid vision model."
-            )
-
-        # Update ModelPatcher device settings
-        clip_vision.patcher.load_device = load_device
-        clip_vision.patcher.offload_device = offload_device
-
-        # Ensure the model is loaded to the specified device
-        comfy.model_management.load_model_gpu(clip_vision.patcher)
-
-        # Log the device used for loading
-        print(f"CLIP vision model loaded to {load_device}")
-        return (clip_vision,)
 
 
 class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
@@ -1345,10 +1163,6 @@ class VAEScaleQwenBlock:
 NODE_CLASS_MAPPINGS = {
     "HDR Effects with LAB Adjust": HDREffectsLabAdjust,
     "SaveImageWithPrompt": SaveImageWithPrompt,
-    "QuadrupleCLIPLoaderSetDevice": QuadrupleCLIPLoaderSetDevice,
-    "TripleCLIPLoaderSetDevice": TripleCLIPLoaderSetDevice,
-    "CLIPVisionLoaderSetDevice": CLIPVisionLoaderSetDevice,
-    "CheckpointLoaderSetClipDevice": CheckpointLoaderSetClipDevice,
     "ModelMergeHiDream": ModelMergeHiDream,
     "ModelScaleQwenImage": ModelScaleQwenImage,
     "CLIPScaleDualSDXLBlock": CLIPScaleDualSDXLBlock,
@@ -1366,10 +1180,6 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HDREffectsLabAdjust": "HDR Effects with LAB Adjusts",
     "SaveImageWithPrompt": "Save Image With Prompt",
-    "QuadrupleCLIPLoaderSetDevice": "Quadruple CLIP Loader (Set Device)",
-    "TripleCLIPLoaderSetDevice": "Triple CLIP Loader (Set Device)",
-    "CLIPVisionLoaderSetDevice": "Load CLIP Vision (Set Device)",
-    "CheckpointLoaderSetClipDevice": "Checkpoint Loader (Set CLIP Device)",
     "ModelMergeHiDream": "Model Merge HiDream",
     "ModelScaleQwenImage": "Model Scale Qwen Image",
     "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",

@@ -1,14 +1,15 @@
 [project]
 name = "comfyui-easygoing-nodes"
-description = "Experimental Text Encorder module and HDR Effects and color adjustment in LAB color space nodes by easygoing0114"
-version = "1.1.4"
-license = { file = "LICENSE.txt" }
+description = "Experimental Text Encoder module and HDR Effects and color adjustment in LAB color space nodes by easygoing0114"
+version = "1.2.0"
+license = { file = "LICENSE" }
 dependencies  = [] # Filled in from requirements.txt
 
 [project.urls]
 Repository = "https://github.com/easygoing0114/ComfyUI-easygoing-nodes"
+Documentation = "https://www.ai-image-journey.com/2025/09/comfyui-easygoing-nodes.html"
 
 [tool.comfy]
 PublisherId = "easygoing0114"
 DisplayName = "Easygoing Nodes"
-Icon = ""
+Icon = "🅴"

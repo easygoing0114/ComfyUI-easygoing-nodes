@@ -4,7 +4,7 @@
 
 # ComfyUI-easygoing-nodes
 
-Enhanced text encoders and custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI) with device-selectable CLIP loaders, HDR effects, and image saving with prompt metadata.
+Enhanced Text Encoder processing for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), featuring custom nodes for HDR effects, image saving with prompt metadata, and model merging.
 
 ## ✨ Features
 
@@ -12,44 +12,29 @@ Enhanced text encoders and custom nodes for [ComfyUI](https://github.com/comfyan
 
 Automatically replaces ComfyUI's built-in Text Encoder modules with enhanced versions that include:
 
-- **CLIP-G Improvements**: [Enhanced attention mask support and better tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
+- **CLIP-G Improvements**: [Enhanced attention mask support and improved tokenization](https://note.com/gentle_murre488/n/n12f2ecce1e00)
 
-The replacement can be toggled on or off individually from ComfyUI's settings.
-
-### 🧩 CLIP Loaders
-
-- **Quadruple CLIP Loader (Set Device)**
-
-<img width="400" height="189" alt="Quadruple CLIP Loader (Set Device) node" src="Images/QuadrupleCLIPLoaderSetDevice node.png">
-
-- **Triple CLIP Loader (Set Device)**
-
-<img width="400" height="170" alt="Triple CLIP Loader (Set Device) node" src="Images/TripleCLIPLoaderSetDevice node.png">
-
-- **Load CLIP Vision (Set Device)**
-
-<img width="400" height="155" alt="CLIP Vision Loader (Set Device) node" src="Images/CLIPVisionLoaderSetDevice node.png">
-
-Includes an option to load the text encoder into RAM and process it on the CPU (consistent with the default Load CLIP and DualCLIPLoader nodes).
+These replacements can be toggled on or off individually via the ComfyUI settings menu.
 
 ### 🌈 HDR Effects with LAB Adjust
 
 <img width="320" height="374" alt="HDR Effects LAB Adjust node" src="Images/HDREffectsLabAdjust node.png">
 
-**Example**
-**Left: Original | Right: HDR Processing**
+**Example (Left: Original | Right: HDR Processing)**
 
 <table>
   <tr>
-    <td><img width="353" height="250" alt="Before HDR example" src="Images/before HDR.png"></td>
-    <td><img width="353" height="250" alt="After HDR example" src="Images/after HDR.png"></td>
+    <td><img width="353" height="250" alt="Before HDR" src="Images/before HDR.png"></td>
+    <td><img width="353" height="250" alt="After HDR" src="Images/after HDR.png"></td>
   </tr>
 </table>
 
-Tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.
-💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustments.
+Advanced tone-mapping with control over shadows, highlights, gamma, contrast, color boost, and LAB channel adjustments.
+💡 This node is based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts) with additional color adjustment features.
 
-### 🧬 ModelMergeHiDream
+### 🧬 Model Merging
+
+**ModelMergeHiDream**
 
 <img width="180" height="650" alt="ModelMergeHiDream node" src="Images/ModelMergeHiDream node.png">
 
@@ -59,7 +44,7 @@ Performs hierarchical merging of HiDream models, enabling advanced model blendin
 
 <img width="240" height="356" alt="Save Image With Prompt node" src="Images/SaveImageWithPrompt node.png">
 
-Save images with positive/negative prompts and captions embedded in PNG metadata.
+Save images with positive/negative prompts and captions embedded directly into the PNG metadata.
 
 ## 🔥 Installation
 
@@ -86,31 +71,38 @@ EasygoingNodes settings loaded: {'enable_sdxl_clip': True}
 
 If you don't see these messages, check that the `modified_modules/` directory contains the necessary files.
 
-## ⚖️ License
-
-This project is licensed under the [MIT License](LICENSE).
-
 ## 🙏 Credits
 
 - Enhanced SDXL CLIP module (`sdxl_clip.py`) by [Shiba-2-shiba](https://github.com/Shiba-2-shiba)
 - HDR Effects based on [ComfyUI-SuperBeasts](https://github.com/SuperBeastsAI/ComfyUI-SuperBeasts)
 
+---
+
+## ⚖️ License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
 ## Update History
+
+### 2026.1.9
+
+- Removed CLIP loader nodes following optimizations in the latest ComfyUI core update.
 
 ### 2025.12.18
 
-- Deleted `hidream.py` replace function
+- Removed `hidream.py` replacement functionality.
 
 ### 2025.12.1
 
-- Implemented CheckpointLoaderSetClipDevice
-- Implemented Many Merge nodes
+- Added various Model Merge nodes.
 
 ### 2025.10.28
 
-- Implemented ModelMergeHiDream
-- Default replacement of HiDream.py turned off
+- Implemented `ModelMergeHiDream`.
+- Disabled default replacement of `HiDream.py`.
 
 ### 2025.9.21
 
-Added toggle functionality for Experimental Text Encoder Modules in ComfyUI settings.
+- Added toggle functionality for Experimental Text Encoder Modules in ComfyUI settings.
