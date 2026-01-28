@@ -449,6 +449,183 @@ class ModelScaleQwenImage:
                 m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
 
         return (m,)
+    
+class ModelScaleZImage:
+    """
+    Z-Image Modelの特定の層をスケーリングするノード。
+    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {"model": ("MODEL",)}
+        
+        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+        
+        # Caption Embedder
+        arg_dict["cap_embedder."] = argument
+        arg_dict["cap_pad_token"] = argument
+        
+        # Context Refiner (2層)
+        for i in range(2):
+            arg_dict["context_refiner.{}.".format(i)] = argument
+        
+        # Main Layers (30層: 0-29)
+        for i in range(30):
+            arg_dict["layers.{}.".format(i)] = argument
+        
+        # Noise Refiner (2層)
+        for i in range(2):
+            arg_dict["noise_refiner.{}.".format(i)] = argument
+        
+        # Final Layer
+        arg_dict["final_layer."] = argument
+        
+        # Time Embedder
+        arg_dict["t_embedder."] = argument
+        
+        # Image Embedder
+        arg_dict["x_embedder."] = argument
+        arg_dict["x_pad_token"] = argument
+        
+        return {"required": arg_dict}
+    
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+    
+    def scale(self, model, **kwargs):
+        """
+        モデルの各層をスケーリングする
+        
+        Args:
+            model: 入力モデル
+            **kwargs: 各層のスケール値
+            
+        Returns:
+            tuple: スケーリング済みモデル
+        """
+        # モデルの複製
+        m = model.clone()
+        
+        # スケーリング比率の辞書（'model'キー以外を抽出）
+        ratios = {k: v for k, v in kwargs.items() if k != "model"}
+        
+        # モデルのパッチ可能なキー（重み）を取得
+        # diffusion_model 以下のパラメータを対象とする
+        kp = m.get_key_patches("diffusion_model.")
+        
+        # 全ての重みキーに対してスケーリングを適用
+        for k in kp:
+            scale_value = 1.0
+            
+            # diffusion_model. を除いた純粋なレイヤー名
+            k_unet = k[len("diffusion_model."):]
+            
+            # 最も長く一致するプレフィックスを探すロジック
+            # （ModelMergeBlocks参照）
+            matched_arg_len = 0
+            for arg_name, arg_value in ratios.items():
+                if k_unet.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale_value = arg_value
+                        matched_arg_len = len(arg_name)
+            
+            # スケーリングの適用
+            # ComfyUIのadd_patchesは (patch, strength_patch, strength_model) を計算する
+            # Output = W * strength_model + P * strength_patch
+            # スケーリングを行うため: W_new = W * scale_value としたい
+            # ここでは W * scale_value として実装
+            if scale_value != 1.0:
+                # kp[k] は元の重みパッチ情報
+                # scale_value を適用したパッチを作成
+                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
+        
+        return (m,)
+    
+class ModelScaleFlux2Klein:
+    """
+    FLUX2 Klein Modelの特定の層をスケーリングするノード。
+    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {"model": ("MODEL",)}
+
+        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0に設定）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        # 基本コンポーネント
+        arg_dict["img_in."] = argument
+        arg_dict["time_in."] = argument
+        arg_dict["txt_in."] = argument
+
+        # Double Blocks (0-4)
+        for i in range(5):
+            arg_dict["double_blocks.{}.".format(i)] = argument
+            # さらに細かく制御したい場合
+            arg_dict["double_blocks.{}.img_attn.".format(i)] = argument
+            arg_dict["double_blocks.{}.img_mlp.".format(i)] = argument
+            arg_dict["double_blocks.{}.txt_attn.".format(i)] = argument
+            arg_dict["double_blocks.{}.txt_mlp.".format(i)] = argument
+
+        # Double Stream Modulation
+        arg_dict["double_stream_modulation_img."] = argument
+        arg_dict["double_stream_modulation_txt."] = argument
+
+        # Single Blocks (0-19)
+        for i in range(20):
+            arg_dict["single_blocks.{}.".format(i)] = argument
+
+        # Single Stream Modulation
+        arg_dict["single_stream_modulation."] = argument
+
+        # Final Layer
+        arg_dict["final_layer."] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    def scale(self, model, **kwargs):
+        # モデルの複製
+        m = model.clone()
+
+        # スケーリング比率の辞書（'model'キー以外を抽出）
+        ratios = {k: v for k, v in kwargs.items() if k != "model"}
+
+        # モデルのパッチ可能なキー（重み）を取得
+        kp = m.get_key_patches("diffusion_model.")
+
+        # 全ての重みキーに対してスケーリングを適用
+        for k in kp:
+            scale_value = 1.0
+            # diffusion_model. を除いた純粋なレイヤー名
+            k_unet = k[len("diffusion_model."):]
+
+            # 最も長く一致するプレフィックスを探すロジック
+            matched_arg_len = 0
+            for arg_name, arg_value in ratios.items():
+                if k_unet.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale_value = arg_value
+                        matched_arg_len = len(arg_name)
+
+            # スケーリングの適用
+            # scale_value != 1.0 のときのみパッチを追加
+            if scale_value != 1.0:
+                # kp[k] は (tensor,) のタプル
+                weight_tensor = kp[k][0]
+                # 元の重みに対して (scale - 1.0) 分をパッチとして追加することで乗算を実現
+                # Output = W * strength_model + P * strength_patch
+                # W_new = W * 1.0 + W * (scale - 1.0) = W * scale
+                m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
+
+        return (m,)
 
 
 class CLIPScaleDualSDXLBlock:
@@ -1076,6 +1253,151 @@ class VAEScaleFluxBlock:
         return (new_vae,)
 
 
+class VAEScaleFlux2Block:
+    """
+    FLUX2 VAEの特定の層をスケーリングするノード
+    scale=1.0 でそのまま、scale=0.0 で完全に抑制
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "vae": ("VAE",),
+        }
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        # --- Batch Normalization ---
+        arg_dict["bn."] = argument
+
+        # --- Encoder ---
+        arg_dict["encoder.conv_in"] = argument
+        arg_dict["encoder.conv_out"] = argument
+        arg_dict["encoder.conv_norm_out"] = argument
+
+        # Encoder down blocks (0-3)
+        for i in range(4):
+            arg_dict[f"encoder.down_blocks.{i}."] = argument
+            # Each down block has resnets (0-1)
+            for j in range(2):
+                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}."] = argument
+                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.conv1"] = argument
+                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.conv2"] = argument
+                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.norm1"] = argument
+                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.norm2"] = argument
+                # conv_shortcut (only in some blocks)
+                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.conv_shortcut"] = argument
+            
+            # Downsamplers (0-2 have downsample)
+            if i < 3:
+                arg_dict[f"encoder.down_blocks.{i}.downsamplers."] = argument
+                arg_dict[f"encoder.down_blocks.{i}.downsamplers.0.conv"] = argument
+
+        # Encoder middle block
+        arg_dict["encoder.mid_block."] = argument
+        arg_dict["encoder.mid_block.resnets.0."] = argument
+        arg_dict["encoder.mid_block.resnets.0.conv1"] = argument
+        arg_dict["encoder.mid_block.resnets.0.conv2"] = argument
+        arg_dict["encoder.mid_block.resnets.0.norm1"] = argument
+        arg_dict["encoder.mid_block.resnets.0.norm2"] = argument
+        arg_dict["encoder.mid_block.resnets.1."] = argument
+        arg_dict["encoder.mid_block.resnets.1.conv1"] = argument
+        arg_dict["encoder.mid_block.resnets.1.conv2"] = argument
+        arg_dict["encoder.mid_block.resnets.1.norm1"] = argument
+        arg_dict["encoder.mid_block.resnets.1.norm2"] = argument
+        arg_dict["encoder.mid_block.attentions.0."] = argument
+        arg_dict["encoder.mid_block.attentions.0.group_norm"] = argument
+        arg_dict["encoder.mid_block.attentions.0.to_q"] = argument
+        arg_dict["encoder.mid_block.attentions.0.to_k"] = argument
+        arg_dict["encoder.mid_block.attentions.0.to_v"] = argument
+        arg_dict["encoder.mid_block.attentions.0.to_out"] = argument
+
+        # --- Quantization ---
+        arg_dict["quant_conv"] = argument
+        arg_dict["post_quant_conv"] = argument
+
+        # --- Decoder ---
+        arg_dict["decoder.conv_in"] = argument
+        arg_dict["decoder.conv_out"] = argument
+        arg_dict["decoder.conv_norm_out"] = argument
+
+        # Decoder middle block
+        arg_dict["decoder.mid_block."] = argument
+        arg_dict["decoder.mid_block.resnets.0."] = argument
+        arg_dict["decoder.mid_block.resnets.0.conv1"] = argument
+        arg_dict["decoder.mid_block.resnets.0.conv2"] = argument
+        arg_dict["decoder.mid_block.resnets.0.norm1"] = argument
+        arg_dict["decoder.mid_block.resnets.0.norm2"] = argument
+        arg_dict["decoder.mid_block.resnets.1."] = argument
+        arg_dict["decoder.mid_block.resnets.1.conv1"] = argument
+        arg_dict["decoder.mid_block.resnets.1.conv2"] = argument
+        arg_dict["decoder.mid_block.resnets.1.norm1"] = argument
+        arg_dict["decoder.mid_block.resnets.1.norm2"] = argument
+        arg_dict["decoder.mid_block.attentions.0."] = argument
+        arg_dict["decoder.mid_block.attentions.0.group_norm"] = argument
+        arg_dict["decoder.mid_block.attentions.0.to_q"] = argument
+        arg_dict["decoder.mid_block.attentions.0.to_k"] = argument
+        arg_dict["decoder.mid_block.attentions.0.to_v"] = argument
+        arg_dict["decoder.mid_block.attentions.0.to_out"] = argument
+
+        # Decoder up blocks (0-3)
+        for i in range(4):
+            arg_dict[f"decoder.up_blocks.{i}."] = argument
+            # Each up block has resnets (0-2)
+            for j in range(3):
+                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}."] = argument
+                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.conv1"] = argument
+                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.conv2"] = argument
+                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.norm1"] = argument
+                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.norm2"] = argument
+                # conv_shortcut (only in some blocks)
+                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.conv_shortcut"] = argument
+            
+            # Upsamplers (0-2 have upsample)
+            if i < 3:
+                arg_dict[f"decoder.up_blocks.{i}.upsamplers."] = argument
+                arg_dict[f"decoder.up_blocks.{i}.upsamplers.0.conv"] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    DESCRIPTION = "Scale specific layers of FLUX2 VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+
+    def scale(self, vae, **kwargs):
+        import comfy.sd
+        
+        ratios = {k: v for k, v in kwargs.items() if k != "vae"}
+
+        # VAEのstate_dictを取得
+        sd = vae.get_sd()
+        new_sd = {}
+
+        for k, v in sd.items():
+            scale = 1.0
+            matched_arg_len = 0
+
+            # 最も長くマッチするプレフィックスを見つける
+            for arg_name, arg_value in ratios.items():
+                if k.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale = arg_value
+                        matched_arg_len = len(arg_name)
+
+            # スケーリングを適用
+            if scale != 1.0:
+                new_sd[k] = v * scale
+            else:
+                new_sd[k] = v
+
+        # 新しいVAEを作成
+        new_vae = comfy.sd.VAE(sd=new_sd)
+
+        return (new_vae,)
+
+
 class VAEScaleQwenBlock:
     """
     Qwen Image VAEの特定の層をスケーリングするノード
@@ -1165,6 +1487,8 @@ NODE_CLASS_MAPPINGS = {
     "SaveImageWithPrompt": SaveImageWithPrompt,
     "ModelMergeHiDream": ModelMergeHiDream,
     "ModelScaleQwenImage": ModelScaleQwenImage,
+    "ModelScaleZImage": ModelScaleZImage,
+    "ModelScaleFlux2Klein": ModelScaleFlux2Klein,
     "CLIPScaleDualSDXLBlock": CLIPScaleDualSDXLBlock,
     "CLIPScaleQwenBlock": CLIPScaleQwenBlock,
     "CLIPSaveQwen": CLIPSaveQwen,
@@ -1174,6 +1498,7 @@ NODE_CLASS_MAPPINGS = {
     "VAEScaleSDXLBlock": VAEScaleSDXLBlock,
     "VAEMergeSDXLBlock": VAEMergeSDXLBlock,
     "VAEScaleFluxBlock": VAEScaleFluxBlock,
+    "VAEScaleFlux2Block": VAEScaleFlux2Block,
     "VAEScaleQwenBlock": VAEScaleQwenBlock,
 }
 
@@ -1182,6 +1507,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveImageWithPrompt": "Save Image With Prompt",
     "ModelMergeHiDream": "Model Merge HiDream",
     "ModelScaleQwenImage": "Model Scale Qwen Image",
+    "ModelScaleZImage": "Model Scale Z-Image",
+    "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
     "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
     "CLIPScaleQwenBlock": "CLIP Scale Qwen Block",
     "CLIPSaveQwen": "CLIP Save Qwen (Fix Prefix)",
@@ -1191,5 +1518,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VAEScaleSDXLBlock": "VAE Scale SDXL Block",
     "VAEMergeSDXLBlock": "VAE Merge SDXL Block",
     "VAEScaleFluxBlock": "VAE Scale FLUX Block",
+    "VAEScaleFlux2Block": "VAE Scale FLUX2 Block",
     "VAEScaleQwenBlock": "VAE Scale Qwen Block",
 }
