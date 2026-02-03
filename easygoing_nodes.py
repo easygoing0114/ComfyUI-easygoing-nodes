@@ -449,7 +449,54 @@ class ModelScaleQwenImage:
                 m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
 
         return (m,)
+
+class ModelMergeZImage(comfy_extras.nodes_model_merging.ModelMergeBlocks):
+    """
+    Z-Image Model専用のマージノード。
+    各層ごとに異なるマージ比率を設定できます。
+    ratio=1.0 でmodel2を100%使用、ratio=0.0 でmodel1を100%使用します。
+    """
     
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {
+            "model1": ("MODEL",),
+            "model2": ("MODEL",)
+        }
+
+        # マージ比率の引数設定（デフォルト1.0、範囲は0.0〜1.0）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        # Caption Embedder
+        arg_dict["cap_embedder."] = argument
+        arg_dict["cap_pad_token"] = argument
+        
+        # Context Refiner (2層: 0-1)
+        for i in range(2):
+            arg_dict["context_refiner.{}.".format(i)] = argument
+        
+        # Main Layers (30層: 0-29)
+        for i in range(30):
+            arg_dict["layers.{}.".format(i)] = argument
+        
+        # Noise Refiner (2層: 0-1)
+        for i in range(2):
+            arg_dict["noise_refiner.{}.".format(i)] = argument
+        
+        # Final Layer
+        arg_dict["final_layer."] = argument
+        
+        # Time Embedder
+        arg_dict["t_embedder."] = argument
+        
+        # Image Embedder
+        arg_dict["x_embedder."] = argument
+        arg_dict["x_pad_token"] = argument
+
+        return {"required": arg_dict}
+
 class ModelScaleZImage:
     """
     Z-Image Modelの特定の層をスケーリングするノード。
@@ -1487,6 +1534,7 @@ NODE_CLASS_MAPPINGS = {
     "SaveImageWithPrompt": SaveImageWithPrompt,
     "ModelMergeHiDream": ModelMergeHiDream,
     "ModelScaleQwenImage": ModelScaleQwenImage,
+    "ModelMergeZImage": ModelMergeZImage,
     "ModelScaleZImage": ModelScaleZImage,
     "ModelScaleFlux2Klein": ModelScaleFlux2Klein,
     "CLIPScaleDualSDXLBlock": CLIPScaleDualSDXLBlock,
@@ -1507,6 +1555,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveImageWithPrompt": "Save Image With Prompt",
     "ModelMergeHiDream": "Model Merge HiDream",
     "ModelScaleQwenImage": "Model Scale Qwen Image",
+    "ModelMergeZImage": "Merge Z-Image Models",
     "ModelScaleZImage": "Model Scale Z-Image",
     "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
     "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
