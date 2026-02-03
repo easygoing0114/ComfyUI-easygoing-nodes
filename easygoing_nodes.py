@@ -1555,7 +1555,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveImageWithPrompt": "Save Image With Prompt",
     "ModelMergeHiDream": "Model Merge HiDream",
     "ModelScaleQwenImage": "Model Scale Qwen Image",
-    "ModelMergeZImage": "Merge Z-Image Models",
+    "ModelMergeZImage": "Model Merge Z-Image",
     "ModelScaleZImage": "Model Scale Z-Image",
     "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
     "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
