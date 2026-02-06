@@ -378,7 +378,76 @@ class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
             arg_dict["single_stream_blocks.{}.".format(i)] = argument
 
         return {"required": arg_dict}
-
+    
+class ModelScaleHiDream:
+    """
+    HiDream系モデル（Full, Dev, Fast）の特定の層をスケーリングするノード。
+    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
+    double_stream_blocks 0-12 と single_stream_blocks 0-31 に対応。
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {"model": ("MODEL",)}
+        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+        
+        # 基本コンポーネント
+        arg_dict["x_embedder."] = argument
+        arg_dict["t_embedder."] = argument
+        arg_dict["caption_projection."] = argument
+        
+        # Double Stream Blocks (0-12)
+        for i in range(13):
+            arg_dict["double_stream_blocks.{}.".format(i)] = argument
+        
+        # Single Stream Blocks (0-31)
+        for i in range(32):
+            arg_dict["single_stream_blocks.{}.".format(i)] = argument
+        
+        return {"required": arg_dict}
+    
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+    DESCRIPTION = "Scale specific layers of HiDream series models (Full, Dev, Fast). Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31."
+    
+    def scale(self, model, **kwargs):
+        # モデルの複製
+        m = model.clone()
+        
+        # スケーリング比率の辞書（'model'キー以外を抽出）
+        ratios = {k: v for k, v in kwargs.items() if k != "model"}
+        
+        # モデルのパッチ可能なキー（重み）を取得
+        # diffusion_model 以下のパラメータを対象とする
+        kp = m.get_key_patches("diffusion_model.")
+        
+        # 全ての重みキーに対してスケーリングを適用
+        for k in kp:
+            scale_value = 1.0
+            # diffusion_model. を除いた純粋なレイヤー名
+            k_unet = k[len("diffusion_model."):]
+            
+            # 最も長く一致するプレフィックスを探すロジック（ModelMergeBlocks参照）
+            matched_arg_len = 0
+            for arg_name, arg_value in ratios.items():
+                if k_unet.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale_value = arg_value
+                        matched_arg_len = len(arg_name)
+            
+            # スケーリングの適用
+            # ComfyUIのadd_patchesは (patch, strength_patch, strength_model) を計算する
+            # Output = W * strength_model + P * strength_patch
+            # スケーリングを行うため: W_new = W * scale_value としたい
+            # ここでは W * 1.0 + W * (scale_value - 1.0) として実装する
+            if scale_value != 1.0:
+                # kp[k] は (tensor,) のタプル
+                weight_tensor = kp[k][0]
+                # 元の重みに対して (scale - 1.0) 分をパッチとして追加することで乗算を実現
+                m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
+        
+        return (m,)
 
 class ModelScaleQwenImage:
     """
@@ -1533,6 +1602,7 @@ NODE_CLASS_MAPPINGS = {
     "HDR Effects with LAB Adjust": HDREffectsLabAdjust,
     "SaveImageWithPrompt": SaveImageWithPrompt,
     "ModelMergeHiDream": ModelMergeHiDream,
+    "ModelScaleHiDream": ModelScaleHiDream,
     "ModelScaleQwenImage": ModelScaleQwenImage,
     "ModelMergeZImage": ModelMergeZImage,
     "ModelScaleZImage": ModelScaleZImage,
@@ -1554,6 +1624,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HDREffectsLabAdjust": "HDR Effects with LAB Adjusts",
     "SaveImageWithPrompt": "Save Image With Prompt",
     "ModelMergeHiDream": "Model Merge HiDream",
+    "ModelScaleHiDream": "Model Scale HiDream",
     "ModelScaleQwenImage": "Model Scale Qwen Image",
     "ModelMergeZImage": "Model Merge Z-Image",
     "ModelScaleZImage": "Model Scale Z-Image",
