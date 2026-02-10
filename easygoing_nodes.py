@@ -419,7 +419,6 @@ class ModelScaleHiDream:
         ratios = {k: v for k, v in kwargs.items() if k != "model"}
         
         # モデルのパッチ可能なキー（重み）を取得
-        # diffusion_model 以下のパラメータを対象とする
         kp = m.get_key_patches("diffusion_model.")
         
         # 全ての重みキーに対してスケーリングを適用
@@ -428,7 +427,7 @@ class ModelScaleHiDream:
             # diffusion_model. を除いた純粋なレイヤー名
             k_unet = k[len("diffusion_model."):]
             
-            # 最も長く一致するプレフィックスを探すロジック（ModelMergeBlocks参照）
+            # 最も長く一致するプレフィックスを探すロジック
             matched_arg_len = 0
             for arg_name, arg_value in ratios.items():
                 if k_unet.startswith(arg_name):
@@ -437,15 +436,14 @@ class ModelScaleHiDream:
                         matched_arg_len = len(arg_name)
             
             # スケーリングの適用
-            # ComfyUIのadd_patchesは (patch, strength_patch, strength_model) を計算する
-            # Output = W * strength_model + P * strength_patch
-            # スケーリングを行うため: W_new = W * scale_value としたい
-            # ここでは W * 1.0 + W * (scale_value - 1.0) として実装する
+            # scale_value != 1.0 の場合のみパッチを適用
             if scale_value != 1.0:
-                # kp[k] は (tensor,) のタプル
-                weight_tensor = kp[k][0]
-                # 元の重みに対して (scale - 1.0) 分をパッチとして追加することで乗算を実現
-                m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
+                # kp[k] はすでに適切なパッチ形式
+                # add_patches(patches_dict, strength_patch, strength_model)
+                # 出力 = weight * strength_model + patch * strength_patch
+                # スケーリングを実現: weight * scale_value
+                # = weight * 1.0 + weight * (scale_value - 1.0)
+                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
         
         return (m,)
 
