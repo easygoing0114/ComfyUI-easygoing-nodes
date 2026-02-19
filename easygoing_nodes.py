@@ -356,6 +356,75 @@ class SaveImageWithPrompt:
 
         return {"ui": {"images": results}}
 
+class ModelScaleSDXL(comfy_extras.nodes_model_merging.ModelMergeBlocks):
+    """
+    SDXL モデルの特定の層をスケーリングするノード。
+    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
+    ModelMergeBlocksを継承し、単一モデルの各層に対してスケール係数を適用します。
+    """
+
+    CATEGORY = "advanced/model_merging/model_specific"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {"model": ("MODEL",)}
+
+        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+
+        arg_dict["time_embed."] = argument
+        arg_dict["label_emb."] = argument
+
+        for i in range(9):
+            arg_dict["input_blocks.{}".format(i)] = argument
+
+        for i in range(3):
+            arg_dict["middle_block.{}".format(i)] = argument
+
+        for i in range(9):
+            arg_dict["output_blocks.{}".format(i)] = argument
+
+        arg_dict["out."] = argument
+
+        return {"required": arg_dict}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "scale"
+
+    def scale(self, model, **kwargs):
+        """
+        モデルの各層をスケーリングする
+
+        Args:
+            model: 入力モデル
+            **kwargs: 各層のスケール値
+
+        Returns:
+            tuple: スケーリング済みモデル
+        """
+        m = model.clone()
+
+        # diffusion_model 以下のパラメータを対象とする
+        kp = m.get_key_patches("diffusion_model.")
+
+        for k in kp:
+            scale_value = 1.0
+            k_unet = k[len("diffusion_model."):]
+
+            # 最も長く一致するプレフィックスを探す
+            matched_arg_len = 0
+            for arg_name, arg_value in kwargs.items():
+                if k_unet.startswith(arg_name) and len(arg_name) > matched_arg_len:
+                    scale_value = arg_value
+                    matched_arg_len = len(arg_name)
+
+            # W_new = W * scale_value
+            # add_patches: output = W * strength_model + P * strength_patch
+            # P = W（元の重み）なので: output = W * 1.0 + W * (scale_value - 1.0) = W * scale_value
+            if scale_value != 1.0:
+                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
+
+        return (m,)
 
 class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
     CATEGORY = "advanced/model_merging/model_specific"
@@ -1599,6 +1668,7 @@ class VAEScaleQwenBlock:
 NODE_CLASS_MAPPINGS = {
     "HDR Effects with LAB Adjust": HDREffectsLabAdjust,
     "SaveImageWithPrompt": SaveImageWithPrompt,
+    "ModelScaleSDXL": ModelScaleSDXL,
     "ModelMergeHiDream": ModelMergeHiDream,
     "ModelScaleHiDream": ModelScaleHiDream,
     "ModelScaleQwenImage": ModelScaleQwenImage,
@@ -1621,6 +1691,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HDREffectsLabAdjust": "HDR Effects with LAB Adjusts",
     "SaveImageWithPrompt": "Save Image With Prompt",
+    "ModelScaleSDXL": "Model Scale SDXL",
     "ModelMergeHiDream": "Model Merge HiDream",
     "ModelScaleHiDream": "Model Scale HiDream",
     "ModelScaleQwenImage": "Model Scale Qwen Image",
