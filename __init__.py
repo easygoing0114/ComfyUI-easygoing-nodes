@@ -1,42 +1,111 @@
-"""
-nodes パッケージ
-各カテゴリのノードを個別ファイルで管理し、NODE_CLASS_MAPPINGS / NODE_DISPLAY_NAME_MAPPINGS を統合してエクスポートする。
+import sys
+import os
+import importlib.util
+from pathlib import Path
 
-  color_nodes.py       : 色調節ノード
-  save_nodes.py        : セーブ用ノード
-  merge_nodes.py       : マージ用ノード
-  text_encode_nodes.py : テキストエンコードノード
-"""
+# カスタムノードのディレクトリを取得
+CUSTOM_NODE_DIR = Path(__file__).parent
 
-from .color_nodes import (
-    NODE_CLASS_MAPPINGS as COLOR_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as COLOR_DISPLAY_MAPPINGS,
-)
-from .save_nodes import (
-    NODE_CLASS_MAPPINGS as SAVE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as SAVE_DISPLAY_MAPPINGS,
-)
-from .merge_nodes import (
-    NODE_CLASS_MAPPINGS as MERGE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as MERGE_DISPLAY_MAPPINGS,
-)
-from .text_encode_nodes import (
-    NODE_CLASS_MAPPINGS as TEXT_ENCODE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as TEXT_ENCODE_DISPLAY_MAPPINGS,
-)
+# 設定マネージャーをインポート
+try:
+    from .settings_manager import get_settings_manager
+    from .web_api import register_api_routes
+    SETTINGS_AVAILABLE = True
+except ImportError:
+    SETTINGS_AVAILABLE = False
 
-NODE_CLASS_MAPPINGS = {
-    **COLOR_CLASS_MAPPINGS,
-    **SAVE_CLASS_MAPPINGS,
-    **MERGE_CLASS_MAPPINGS,
-    **TEXT_ENCODE_CLASS_MAPPINGS,
-}
+def replace_module_with_custom(module_path, custom_module_path):
+    """既存のモジュールをカスタムモジュールで置き換える"""
+    try:
+        spec = importlib.util.spec_from_file_location(module_path, custom_module_path)
+        custom_module = importlib.util.module_from_spec(spec)
+        sys.modules[module_path] = custom_module
+        spec.loader.exec_module(custom_module)
+        return True
+    except Exception:
+        return False
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    **COLOR_DISPLAY_MAPPINGS,
-    **SAVE_DISPLAY_MAPPINGS,
-    **MERGE_DISPLAY_MAPPINGS,
-    **TEXT_ENCODE_DISPLAY_MAPPINGS,
-}
+def is_module_replacement_enabled(module_name):
+    """設定に基づいてモジュール置換が有効かどうかを確認"""
+    if not SETTINGS_AVAILABLE:
+        return True
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+    try:
+        settings_manager = get_settings_manager()
+        return settings_manager.is_module_enabled(module_name)
+    except Exception:
+        return True
+
+def apply_custom_modules():
+    """修正版モジュールを設定に基づいて適用（SDXL CLIPのみ）"""
+    # 修正版ファイルのパス
+    custom_sdxl_clip_path = CUSTOM_NODE_DIR / "modified_modules" / "sdxl_clip.py"
+
+    applied_modules = []
+    skipped_modules = []
+
+    # 設定を読み込んで表示
+    if SETTINGS_AVAILABLE:
+        try:
+            settings_manager = get_settings_manager()
+            settings = settings_manager.get_settings()
+            print(f"EasygoingNodes settings loaded: {settings}")
+        except Exception:
+            pass
+
+    # sdxl_clip.pyの置き換え
+    if custom_sdxl_clip_path.exists():
+        if is_module_replacement_enabled("sdxl_clip"):
+            if replace_module_with_custom("comfy.sdxl_clip", custom_sdxl_clip_path):
+                applied_modules.append("sdxl_clip")
+        else:
+            skipped_modules.append("sdxl_clip")
+
+    # 結果のサマリーを表示
+    if applied_modules:
+        print(f"✓ Applied module replacements: {', '.join(applied_modules)}")
+    if skipped_modules:
+        print(f"⊘ Skipped module replacements: {', '.join(skipped_modules)}")
+
+    return True
+
+def setup_web_api():
+    """ComfyUIのWebサーバーにAPIルートを登録"""
+    if not SETTINGS_AVAILABLE:
+        return
+
+    try:
+        import server
+        if hasattr(server, 'PromptServer'):
+            app = server.PromptServer.instance.app
+            register_api_routes(app)
+    except Exception:
+        pass
+
+# モジュール置換を実行
+try:
+    apply_custom_modules()
+    setup_web_api()
+except Exception:
+    pass
+
+# nodesパッケージからノード定義をインポート
+# 分割構成: nodes/color_nodes.py / nodes/save_nodes.py / nodes/merge_nodes.py
+try:
+    from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+except ImportError:
+    # フォールバック: 旧来の単一ファイルからインポート
+    try:
+        from .easygoing_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+    except ImportError:
+        NODE_CLASS_MAPPINGS = {}
+        NODE_DISPLAY_NAME_MAPPINGS = {}
+
+# Web拡張機能の定義
+WEB_DIRECTORY = "./web"
+
+__all__ = [
+    'NODE_CLASS_MAPPINGS',
+    'NODE_DISPLAY_NAME_MAPPINGS',
+    'WEB_DIRECTORY'
+]
