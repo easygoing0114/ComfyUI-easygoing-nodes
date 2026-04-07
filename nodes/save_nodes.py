@@ -2,6 +2,7 @@ import os
 import json
 import numpy as np
 import torch
+import re
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import folder_paths
@@ -53,9 +54,10 @@ class SaveImageWithPrompt:
         prompt=None,
         extra_pnginfo=None,
     ):
-        # ファイル名プレフィックスを200文字以内に制限
+        # ファイル名プレフィックスを180文字以内に制限
         if len(filename_prefix) > 180:
             filename_prefix = filename_prefix[:180]
+        filename_prefix = re.sub(r'\s+', '_', filename_prefix)
 
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = (
