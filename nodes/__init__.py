@@ -6,7 +6,7 @@ nodes パッケージ
   save_nodes.py                   : セーブ用ノード
   merge_nodes.py                  : マージ用ノード
   text_encode_nodes.py            : テキストエンコードノード
-  image_difference_checker_node.py: 画像差分チェッカーノード
+  image_difference_checker_nodes.py: 画像差分チェッカーノード
 """
 
 from .color_nodes import (
@@ -25,7 +25,7 @@ from .text_encode_nodes import (
     NODE_CLASS_MAPPINGS as TEXT_ENCODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as TEXT_ENCODE_DISPLAY_MAPPINGS,
 )
-from .image_difference_checker_node import (
+from .image_difference_checker_nodes import (
     NODE_CLASS_MAPPINGS as IMAGE_DIFF_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as IMAGE_DIFF_DISPLAY_MAPPINGS,
 )
