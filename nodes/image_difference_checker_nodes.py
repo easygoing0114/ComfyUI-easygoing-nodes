@@ -160,7 +160,7 @@ class ImageDifferenceChecker:
         # result_text 生成
         mae_line  = f"MAE:  {mae_value:.1f}  (Similarity: {mae_similarity:.1f}%)"
         ssim_line = f"SSIM: {ssim_value:.3f}  (Similarity: {ssim_similarity:.1f}%)"
-        result_text = f"### Difference\n\n{mae_line}\n{ssim_line}"
+        result_text = f"### Difference\n\n{mae_line}  \n{ssim_line}"
 
         if show_tone_analysis:
             tone_md = self._build_tone_table_markdown(np1, np2)
