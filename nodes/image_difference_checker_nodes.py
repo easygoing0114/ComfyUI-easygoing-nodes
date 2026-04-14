@@ -20,6 +20,7 @@ class ImageDifferenceChecker:
                     "display": "slider"
                 }),
                 "dark_mode": ("BOOLEAN", {"default": True}),
+                "show_original_image": ("BOOLEAN", {"default": True}),
                 "show_difference_map": ("BOOLEAN", {"default": True}),
                 "show_tone_analysis": ("BOOLEAN", {"default": False}),
             }
@@ -100,6 +101,7 @@ class ImageDifferenceChecker:
     # ------------------------------------------------------------------ #
     def compare_images(self, image1: torch.Tensor, image2: torch.Tensor,
                        ui_scale: float, dark_mode: bool,
+                       show_original_image: bool,
                        show_difference_map: bool, show_tone_analysis: bool):
 
         _SCALE = max(1.0, ui_scale)
@@ -172,7 +174,8 @@ class ImageDifferenceChecker:
         result_pil = self._build_result_image_detailed(
             np1, np2, color_diff_np, gray_diff_np,
             mae_value, mae_similarity, ssim_value, ssim_similarity,
-            bg_color, text_color, show_difference_map, show_tone_analysis,
+            bg_color, text_color,
+            show_original_image, show_difference_map, show_tone_analysis,
             _SCALE, _PAD, _GAP, _LABEL_H, _METRICS_H, _LABEL_SIZE, _STAT_SIZE,
             _get_font, _get_mono_font
         )
@@ -258,7 +261,8 @@ class ImageDifferenceChecker:
     # ------------------------------------------------------------------ #
     def _build_result_image_detailed(self, np1, np2, color_diff_np, gray_diff_np,
                                      mae_v, mae_s, ssim_v, ssim_s,
-                                     bg_color, text_color, show_diff, show_tone,
+                                     bg_color, text_color,
+                                     show_original, show_diff, show_tone,
                                      _SCALE, _PAD, _GAP, _LABEL_H, _METRICS_H,
                                      _LABEL_SIZE, _STAT_SIZE, _get_font, _get_mono_font):
 
@@ -277,13 +281,20 @@ class ImageDifferenceChecker:
             ascii_panel_h = dummy.height
 
         # キャンバス高さの計算
-        # 1) Input images
-        total_h = _PAD + _LABEL_H + h
+        # 1) Input images（任意）
+        total_h = _PAD
+        if show_original:
+            total_h += _LABEL_H + h
         # 2) Difference maps（任意）
         if show_diff:
-            total_h += _GAP + _LABEL_H + h
+            # 元画像が表示される場合は _GAP を挟む、最初のセクションなら不要
+            if show_original:
+                total_h += _GAP
+            total_h += _LABEL_H + h
         # 3) MAE & SSIM（常に表示）
-        total_h += _GAP + _METRICS_H
+        if show_original or show_diff:
+            total_h += _GAP
+        total_h += _METRICS_H
         # 4) Tone curve（任意）
         if show_tone:
             total_h += _GAP + _LABEL_H + graph_h
@@ -314,19 +325,22 @@ class ImageDifferenceChecker:
         curr_y = _PAD
 
         # ── 1) Input images ──────────────────────────────────────────────
-        paste_panel(np1, "Image 1", _PAD, curr_y, w, h)
-        paste_panel(np2, "Image 2", _PAD + w + _GAP, curr_y, w, h)
-        curr_y += _LABEL_H + h
+        if show_original:
+            paste_panel(np1, "Image 1", _PAD, curr_y, w, h)
+            paste_panel(np2, "Image 2", _PAD + w + _GAP, curr_y, w, h)
+            curr_y += _LABEL_H + h
 
         # ── 2) Difference maps ───────────────────────────────────────────
         if show_diff:
-            curr_y += _GAP
+            if show_original:
+                curr_y += _GAP
             paste_panel(color_diff_np, "Color Difference", _PAD, curr_y, w, h)
             paste_panel(gray_diff_np, "Grayscale Difference", _PAD + w + _GAP, curr_y, w, h)
             curr_y += _LABEL_H + h
 
         # ── 3) MAE & SSIM ────────────────────────────────────────────────
-        curr_y += _GAP
+        if show_original or show_diff:
+            curr_y += _GAP
         left_x  = _PAD + w // 2
         right_x = _PAD + w + _GAP + w // 2
 
