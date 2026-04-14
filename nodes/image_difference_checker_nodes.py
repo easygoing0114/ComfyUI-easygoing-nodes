@@ -300,7 +300,7 @@ class ImageDifferenceChecker:
             total_h += _GAP + _LABEL_H + graph_h
         # 5) Tone table（任意）
         if show_tone:
-            total_h += _GAP + _LABEL_H + ascii_panel_h
+            total_h += _GAP + ascii_panel_h
         total_h += _PAD
 
         total_w = _PAD + w + _GAP + w + _PAD
@@ -384,9 +384,9 @@ class ImageDifferenceChecker:
                 np2, w, bg_color, text_color,
                 _SCALE, _STAT_SIZE, _get_mono_font
             )
-            paste_panel(table1, "Image 1 Tone Table", _PAD, curr_y, w, ascii_panel_h)
-            paste_panel(table2, "Image 2 Tone Table", _PAD + w + _GAP, curr_y, w, ascii_panel_h)
-            curr_y += _LABEL_H + ascii_panel_h
+            canvas.paste(table1, (_PAD, curr_y))
+            canvas.paste(table2, (_PAD + w + _GAP, curr_y))
+            curr_y += ascii_panel_h
 
         return canvas
 
