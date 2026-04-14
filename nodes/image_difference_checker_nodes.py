@@ -13,7 +13,7 @@ class ImageDifferenceChecker:
                 "image1": ("IMAGE",),
                 "image2": ("IMAGE",),
                 "ui_scale": ("FLOAT", {
-                    "default": 4.0,
+                    "default": 2.8,
                     "min": 1.0,
                     "max": 8.0,
                     "step": 0.1,
@@ -45,11 +45,12 @@ class ImageDifferenceChecker:
         channels = ["Red", "Green", "Blue"]
 
         def make_table(np_img, title):
-            header = f"**{title}**\n\n| Channel | Sum | Avg |\n|---------|-----|-----|"
+            header = f"**{title}**\n\n| Channel | Sum | Avg | % |\n|---------|-----|-----|---|"
             rows = []
             for i, ch in enumerate(channels):
                 c = np_img[:, :, i] * 255
-                rows.append(f"| {ch} | {np.sum(c):,.0f} | {np.mean(c):.1f} |")
+                pct = f"{np.mean(np_img[:, :, i]) * 100:.1f}%"
+                rows.append(f"| {ch} | {np.sum(c):,.0f} | {np.mean(c):.1f} | {pct} |")
             return header + "\n" + "\n".join(rows)
 
         return make_table(np1, "Image 1") + "\n\n" + make_table(np2, "Image 2")
@@ -66,28 +67,31 @@ class ImageDifferenceChecker:
         rows = []
         for i, ch in enumerate(channels):
             c = np_img[:, :, i] * 255
-            rows.append((ch, f"{np.sum(c):,.0f}", f"{np.mean(c):.1f}"))
+            pct = f"{np.mean(np_img[:, :, i]) * 100:.1f}%"
+            rows.append((ch, f"{np.sum(c):,.0f}", f"{np.mean(c):.1f}", pct))
 
-        col_headers = ["Channel", "Sum", "Avg"]
+        col_headers = ["Channel", "Sum", "Avg", "%"]
         col_w = [
             max(len(col_headers[0]), max(len(r[0]) for r in rows)),
             max(len(col_headers[1]), max(len(r[1]) for r in rows)),
             max(len(col_headers[2]), max(len(r[2]) for r in rows)),
+            max(len(col_headers[3]), max(len(r[3]) for r in rows)),
         ]
 
         def hline(left, mid, right, fill="─"):
-            return left + fill * (col_w[0] + 2) + mid + fill * (col_w[1] + 2) + mid + fill * (col_w[2] + 2) + right
+            return (left + fill * (col_w[0] + 2) + mid + fill * (col_w[1] + 2)
+                    + mid + fill * (col_w[2] + 2) + mid + fill * (col_w[3] + 2) + right)
 
-        def row_line(a, b, c):
-            return f"│ {a:<{col_w[0]}} │ {b:>{col_w[1]}} │ {c:>{col_w[2]}} │"
+        def row_line(a, b, c, d):
+            return f"│ {a:<{col_w[0]}} │ {b:>{col_w[1]}} │ {c:>{col_w[2]}} │ {d:>{col_w[3]}} │"
 
         lines = [
             hline("┌", "┬", "┐"),
             row_line(*col_headers),
             hline("├", "┼", "┤"),
         ]
-        for ch, s, a in rows:
-            lines.append(row_line(ch, s, a))
+        for ch, s, a, p in rows:
+            lines.append(row_line(ch, s, a, p))
         lines.append(hline("└", "┴", "┘"))
         return "\n".join(lines)
 
