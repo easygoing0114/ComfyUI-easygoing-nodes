@@ -13,7 +13,7 @@ class ImageDifferenceChecker:
                 "image1": ("IMAGE",),
                 "image2": ("IMAGE",),
                 "ui_scale": ("FLOAT", {
-                    "default": 2.8,
+                    "default": 3.2,
                     "min": 1.0,
                     "max": 8.0,
                     "step": 0.1,
@@ -160,8 +160,8 @@ class ImageDifferenceChecker:
         ssim_similarity = ssim_value * 100.0
 
         # result_text 生成
-        mae_line  = f"MAE:  {mae_value:.1f}  (Similarity: {mae_similarity:.1f}%)"
-        ssim_line = f"SSIM: {ssim_value:.3f}  (Similarity: {ssim_similarity:.1f}%)"
+        mae_line  = f"MAE:  {mae_value:.8f}  (Similarity: {mae_similarity:.1f}%)"
+        ssim_line = f"SSIM: {ssim_value:.8f}  (Similarity: {ssim_similarity:.1f}%)"
         result_text = f"### Difference\n\n{mae_line}  \n{ssim_line}"
 
         if show_tone_analysis:
