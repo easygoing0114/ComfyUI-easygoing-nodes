@@ -88,7 +88,7 @@ This project is licensed under the [MIT License](LICENSE).
 
 ### 2026.4.16
 
-- Add Image Difference Checker node.
+- Add `Image Difference Checker` node.
 
 ### 2026.1.9
 
