@@ -86,6 +86,10 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Update History
 
+### 2026.4.16
+
+- Add Image Difference Checker node.
+
 ### 2026.1.9
 
 - Removed CLIP loader nodes following optimizations in the latest ComfyUI core update.
