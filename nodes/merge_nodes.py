@@ -761,77 +761,84 @@ class VAEScaleSDXLBlock:
     """
     SDXL VAEの特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
+
+    get_sd() はComfyUI内部のldm形式キーを返す:
+      encoder.down_blocks.N.resnets.M.* -> encoder.down.N.block.M.*
+      encoder.mid_block.resnets.0.*     -> encoder.mid.block_1.*
+      encoder.mid_block.resnets.1.*     -> encoder.mid.block_2.*
+      encoder.mid_block.attentions.0.*  -> encoder.mid.attn_1.*
+      encoder.conv_norm_out.*           -> encoder.norm_out.*
+      decoder.up_blocks.N.*             -> decoder.up.N.*
+      decoder.mid_block.resnets.0.*     -> decoder.mid.block_1.*
+      decoder.mid_block.resnets.1.*     -> decoder.mid.block_2.*
+      decoder.mid_block.attentions.0.*  -> decoder.mid.attn_1.*
+      decoder.conv_norm_out.*           -> decoder.norm_out.*
     """
+
+    LAYER_KEYS = [
+        # Quantization
+        "quant_conv",
+        "post_quant_conv",
+        # Encoder
+        "encoder.conv_in",
+        *[f"encoder.down.{i}." for i in range(4)],
+        "encoder.mid.attn_1.",
+        "encoder.mid.block_1.",
+        "encoder.mid.block_2.",
+        "encoder.norm_out",
+        "encoder.conv_out",
+        # Decoder
+        "decoder.conv_in",
+        "decoder.mid.attn_1.",
+        "decoder.mid.block_1.",
+        "decoder.mid.block_2.",
+        *[f"decoder.up.{i}." for i in range(4)],
+        "decoder.norm_out",
+        "decoder.conv_out",
+    ]
 
     @classmethod
     def INPUT_TYPES(s):
-        arg_dict = {
-            "vae": ("VAE",),
-        }
-
+        arg_dict = {"vae": ("VAE",)}
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
-        # --- Quantization layers ---
-        arg_dict["quant_conv"] = argument
-        arg_dict["post_quant_conv"] = argument
-
-        # --- Encoder ---
-        arg_dict["encoder.conv_in"] = argument
-        # Encoder down_blocks (0-3)
-        for i in range(4):
-            arg_dict[f"encoder.down_blocks.{i}."] = argument
-        # Encoder mid_block
-        arg_dict["encoder.mid_block.attentions.0."] = argument
-        arg_dict["encoder.mid_block.resnets.0."] = argument
-        arg_dict["encoder.mid_block.resnets.1."] = argument
-        arg_dict["encoder.conv_norm_out"] = argument
-        arg_dict["encoder.conv_out"] = argument
-
-        # --- Decoder ---
-        arg_dict["decoder.conv_in"] = argument
-        # Decoder mid_block
-        arg_dict["decoder.mid_block.attentions.0."] = argument
-        arg_dict["decoder.mid_block.resnets.0."] = argument
-        arg_dict["decoder.mid_block.resnets.1."] = argument
-        # Decoder up_blocks (0-3)
-        for i in range(4):
-            arg_dict[f"decoder.up_blocks.{i}."] = argument
-        arg_dict["decoder.conv_norm_out"] = argument
-        arg_dict["decoder.conv_out"] = argument
-
+        for key in s.LAYER_KEYS:
+            arg_dict[key] = argument
         return {"required": arg_dict}
 
     RETURN_TYPES = ("VAE",)
     FUNCTION = "scale"
     CATEGORY = "advanced/model_merging/model_specific"
-
-    DESCRIPTION = "Scale specific layers of SDXL VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+    DESCRIPTION = (
+        "Scale specific layers of SDXL VAE. "
+        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+    )
 
     def scale(self, vae, **kwargs):
-        import torch
+        # kwargs のキーを LAYER_KEYS に復元（ComfyUI が "." を "_" に変換する場合に対応）
+        kwarg_to_layer = {
+            layer_key.replace(".", "_"): layer_key
+            for layer_key in self.LAYER_KEYS
+        }
+        ratios = {}
+        for k, v in kwargs.items():
+            if k in kwarg_to_layer:
+                ratios[kwarg_to_layer[k]] = v
+            elif k in self.LAYER_KEYS:
+                ratios[k] = v
 
-        ratios = {k: v for k, v in kwargs.items() if k != "vae"}
-
+        # テンソルのスケーリング
         sd = vae.get_sd()
         new_sd = {}
-
-        for k, v in sd.items():
+        for tensor_key, tensor_val in sd.items():
             scale = 1.0
-            matched_arg_len = 0
-
+            matched_len = 0
             for arg_name, arg_value in ratios.items():
-                if k.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale = arg_value
-                        matched_arg_len = len(arg_name)
-
-            if scale != 1.0:
-                new_sd[k] = v * scale
-            else:
-                new_sd[k] = v
+                if tensor_key.startswith(arg_name) and len(arg_name) > matched_len:
+                    scale = arg_value
+                    matched_len = len(arg_name)
+            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
 
         new_vae = comfy.sd.VAE(sd=new_sd)
-
         return (new_vae,)
 
 
@@ -839,7 +846,41 @@ class VAEMergeSDXLBlock:
     """
     2つのSDXL VAEをブロック単位でマージするノード
     ratio=1.0 で vae2 を使用、ratio=0.0 で vae1 を使用
+
+    get_sd() はComfyUI内部のldm形式キーを返す:
+      encoder.down_blocks.N.resnets.M.* -> encoder.down.N.block.M.*
+      encoder.mid_block.resnets.0.*     -> encoder.mid.block_1.*
+      encoder.mid_block.resnets.1.*     -> encoder.mid.block_2.*
+      encoder.mid_block.attentions.0.*  -> encoder.mid.attn_1.*
+      encoder.conv_norm_out.*           -> encoder.norm_out.*
+      decoder.up_blocks.N.*             -> decoder.up.N.*
+      decoder.mid_block.resnets.0.*     -> decoder.mid.block_1.*
+      decoder.mid_block.resnets.1.*     -> decoder.mid.block_2.*
+      decoder.mid_block.attentions.0.*  -> decoder.mid.attn_1.*
+      decoder.conv_norm_out.*           -> decoder.norm_out.*
     """
+
+    LAYER_KEYS = [
+        # Quantization
+        "quant_conv",
+        "post_quant_conv",
+        # Encoder
+        "encoder.conv_in",
+        *[f"encoder.down.{i}." for i in range(4)],
+        "encoder.mid.attn_1.",
+        "encoder.mid.block_1.",
+        "encoder.mid.block_2.",
+        "encoder.norm_out",
+        "encoder.conv_out",
+        # Decoder
+        "decoder.conv_in",
+        "decoder.mid.attn_1.",
+        "decoder.mid.block_1.",
+        "decoder.mid.block_2.",
+        *[f"decoder.up.{i}." for i in range(4)],
+        "decoder.norm_out",
+        "decoder.conv_out",
+    ]
 
     @classmethod
     def INPUT_TYPES(s):
@@ -847,47 +888,30 @@ class VAEMergeSDXLBlock:
             "vae1": ("VAE",),
             "vae2": ("VAE",),
         }
-
         argument = ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01})
-
-        # --- Quantization layers ---
-        arg_dict["quant_conv"] = argument
-        arg_dict["post_quant_conv"] = argument
-
-        # --- Encoder ---
-        arg_dict["encoder.conv_in"] = argument
-        for i in range(4):
-            arg_dict[f"encoder.down_blocks.{i}."] = argument
-        arg_dict["encoder.mid_block.attentions.0."] = argument
-        arg_dict["encoder.mid_block.resnets.0."] = argument
-        arg_dict["encoder.mid_block.resnets.1."] = argument
-        arg_dict["encoder.conv_norm_out"] = argument
-        arg_dict["encoder.conv_out"] = argument
-
-        # --- Decoder ---
-        arg_dict["decoder.conv_in"] = argument
-        arg_dict["decoder.mid_block.attentions.0."] = argument
-        arg_dict["decoder.mid_block.resnets.0."] = argument
-        arg_dict["decoder.mid_block.resnets.1."] = argument
-        for i in range(4):
-            arg_dict[f"decoder.up_blocks.{i}."] = argument
-        arg_dict["decoder.conv_norm_out"] = argument
-        arg_dict["decoder.conv_out"] = argument
-
+        for key in s.LAYER_KEYS:
+            arg_dict[key] = argument
         return {"required": arg_dict}
 
     RETURN_TYPES = ("VAE",)
     FUNCTION = "merge"
     CATEGORY = "advanced/model_merging/model_specific"
-
     DESCRIPTION = (
         "Block-wise merging for SDXL VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2."
     )
 
     def merge(self, vae1, vae2, **kwargs):
-        import torch
-
-        ratios = {k: v for k, v in kwargs.items() if k not in ["vae1", "vae2"]}
+        # kwargs のキーを LAYER_KEYS に復元（ComfyUI が "." を "_" に変換する場合に対応）
+        kwarg_to_layer = {
+            layer_key.replace(".", "_"): layer_key
+            for layer_key in self.LAYER_KEYS
+        }
+        ratios = {}
+        for k, v in kwargs.items():
+            if k in kwarg_to_layer:
+                ratios[kwarg_to_layer[k]] = v
+            elif k in self.LAYER_KEYS:
+                ratios[k] = v
 
         sd1 = vae1.get_sd()
         sd2 = vae2.get_sd()
@@ -900,22 +924,20 @@ class VAEMergeSDXLBlock:
                 continue
 
             ratio = 0.5
-            matched_arg_len = 0
-
+            matched_len = 0
             for arg_name, arg_value in ratios.items():
-                if k.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        ratio = arg_value
-                        matched_arg_len = len(arg_name)
+                if k.startswith(arg_name) and len(arg_name) > matched_len:
+                    ratio = arg_value
+                    matched_len = len(arg_name)
 
             new_sd[k] = sd1[k] * (1.0 - ratio) + sd2[k] * ratio
 
+        # sd2 にしか存在しないキーはそのまま追加
         for k in sd2.keys():
             if k not in new_sd:
                 new_sd[k] = sd2[k]
 
         new_vae = comfy.sd.VAE(sd=new_sd)
-
         return (new_vae,)
 
 
@@ -923,93 +945,76 @@ class VAEScaleFluxBlock:
     """
     FLUX1 VAEの特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
+
+    FLUX1 AEのget_sd()はldm形式をそのまま返すため、
+    SDXLのようなキーリマップは不要。
+    ただしComfyUIがINPUT_TYPESのキーの"."を"_"に変換して
+    kwargsに渡すため、逆引きテーブルで復元が必要。
     """
+
+    LAYER_KEYS = [
+        # Encoder
+        "encoder.conv_in",
+        "encoder.conv_out",
+        "encoder.norm_out",
+        *[f"encoder.down.{i}." for i in range(4)],
+        *[f"encoder.down.{i}.block.{j}." for i in range(4) for j in range(3)],
+        *[f"encoder.down.{i}.downsample." for i in range(3)],  # 0-2 のみ
+        "encoder.mid.",
+        "encoder.mid.block_1.",
+        "encoder.mid.block_2.",
+        "encoder.mid.attn_1.",
+        # Decoder
+        "decoder.conv_in",
+        "decoder.conv_out",
+        "decoder.norm_out",
+        *[f"decoder.up.{i}." for i in range(4)],
+        *[f"decoder.up.{i}.block.{j}." for i in range(4) for j in range(3)],
+        *[f"decoder.up.{i}.upsample." for i in range(1, 4)],  # 1-3 のみ
+        "decoder.mid.",
+        "decoder.mid.block_1.",
+        "decoder.mid.block_2.",
+        "decoder.mid.attn_1.",
+    ]
 
     @classmethod
     def INPUT_TYPES(s):
-        arg_dict = {
-            "vae": ("VAE",),
-        }
-
+        arg_dict = {"vae": ("VAE",)}
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
-        # --- Encoder ---
-        arg_dict["encoder.conv_in"] = argument
-        arg_dict["encoder.conv_out"] = argument
-        arg_dict["encoder.norm_out"] = argument
-
-        # Encoder down blocks (0-3)
-        for i in range(4):
-            arg_dict[f"encoder.down.{i}."] = argument
-            # Each down block has multiple sub-blocks (0-2)
-            for j in range(3):
-                arg_dict[f"encoder.down.{i}.block.{j}."] = argument
-            # Downsample layers (0-2 have downsample)
-            if i < 3:
-                arg_dict[f"encoder.down.{i}.downsample."] = argument
-
-        # Encoder middle blocks
-        arg_dict["encoder.mid."] = argument
-        arg_dict["encoder.mid.block_1."] = argument
-        arg_dict["encoder.mid.block_2."] = argument
-        arg_dict["encoder.mid.attn_1."] = argument
-
-        # --- Decoder ---
-        arg_dict["decoder.conv_in"] = argument
-        arg_dict["decoder.conv_out"] = argument
-        arg_dict["decoder.norm_out"] = argument
-
-        # Decoder up blocks (0-3)
-        for i in range(4):
-            arg_dict[f"decoder.up.{i}."] = argument
-            # Each up block has multiple sub-blocks (0-2)
-            for j in range(3):
-                arg_dict[f"decoder.up.{i}.block.{j}."] = argument
-            # Upsample layers (1-3 have upsample)
-            if i > 0:
-                arg_dict[f"decoder.up.{i}.upsample."] = argument
-
-        # Decoder middle blocks
-        arg_dict["decoder.mid."] = argument
-        arg_dict["decoder.mid.block_1."] = argument
-        arg_dict["decoder.mid.block_2."] = argument
-        arg_dict["decoder.mid.attn_1."] = argument
-
+        for key in s.LAYER_KEYS:
+            arg_dict[key] = argument
         return {"required": arg_dict}
 
     RETURN_TYPES = ("VAE",)
     FUNCTION = "scale"
     CATEGORY = "advanced/model_merging/model_specific"
-
     DESCRIPTION = "Scale specific layers of FLUX1 VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
 
     def scale(self, vae, **kwargs):
-        ratios = {k: v for k, v in kwargs.items() if k != "vae"}
+        # ComfyUI が "." を "_" に変換する場合に備えて逆引きテーブルを作成
+        kwarg_to_layer = {
+            layer_key.replace(".", "_"): layer_key
+            for layer_key in self.LAYER_KEYS
+        }
+        ratios = {}
+        for k, v in kwargs.items():
+            if k in kwarg_to_layer:
+                ratios[kwarg_to_layer[k]] = v
+            elif k in self.LAYER_KEYS:
+                ratios[k] = v
 
-        # VAEのstate_dictを取得
         sd = vae.get_sd()
         new_sd = {}
-
-        for k, v in sd.items():
+        for tensor_key, tensor_val in sd.items():
             scale = 1.0
-            matched_arg_len = 0
-
-            # 最も長くマッチするプレフィックスを見つける
+            matched_len = 0
             for arg_name, arg_value in ratios.items():
-                if k.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale = arg_value
-                        matched_arg_len = len(arg_name)
+                if tensor_key.startswith(arg_name) and len(arg_name) > matched_len:
+                    scale = arg_value
+                    matched_len = len(arg_name)
+            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
 
-            # スケーリングを適用
-            if scale != 1.0:
-                new_sd[k] = v * scale
-            else:
-                new_sd[k] = v
-
-        # 新しいVAEを作成
         new_vae = comfy.sd.VAE(sd=new_sd)
-
         return (new_vae,)
 
 
@@ -1017,144 +1022,91 @@ class VAEScaleFlux2Block:
     """
     FLUX2 VAEの特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
+
+    get_sd() はComfyUI内部のldm形式キーを返す（SDXLと同様）:
+      encoder.down_blocks.N.*          -> encoder.down.N.*
+      encoder.mid_block.resnets.0.*    -> encoder.mid.block_1.*
+      encoder.mid_block.resnets.1.*    -> encoder.mid.block_2.*
+      encoder.mid_block.attentions.0.* -> encoder.mid.attn_1.*
+      encoder.conv_norm_out.*          -> encoder.norm_out.*
+      decoder.up_blocks.N.*            -> decoder.up.N.*
+      decoder.mid_block.resnets.0.*    -> decoder.mid.block_1.*
+      decoder.mid_block.resnets.1.*    -> decoder.mid.block_2.*
+      decoder.mid_block.attentions.0.* -> decoder.mid.attn_1.*
+      decoder.conv_norm_out.*          -> decoder.norm_out.*
+
+    注意: bn.* テンソル（I64）はスケーリング対象外
     """
+
+    LAYER_KEYS = [
+        # Quantization
+        "quant_conv",
+        "post_quant_conv",
+        # Encoder
+        "encoder.conv_in",
+        "encoder.conv_out",
+        "encoder.norm_out",
+        *[f"encoder.down.{i}." for i in range(4)],
+        "encoder.mid.attn_1.",
+        "encoder.mid.block_1.",
+        "encoder.mid.block_2.",
+        # Decoder
+        "decoder.conv_in",
+        "decoder.conv_out",
+        "decoder.norm_out",
+        "decoder.mid.attn_1.",
+        "decoder.mid.block_1.",
+        "decoder.mid.block_2.",
+        *[f"decoder.up.{i}." for i in range(4)],
+    ]
 
     @classmethod
     def INPUT_TYPES(s):
-        arg_dict = {
-            "vae": ("VAE",),
-        }
-
+        arg_dict = {"vae": ("VAE",)}
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
-        # --- Batch Normalization ---
-        arg_dict["bn."] = argument
-
-        # --- Encoder ---
-        arg_dict["encoder.conv_in"] = argument
-        arg_dict["encoder.conv_out"] = argument
-        arg_dict["encoder.conv_norm_out"] = argument
-
-        # Encoder down blocks (0-3)
-        for i in range(4):
-            arg_dict[f"encoder.down_blocks.{i}."] = argument
-            # Each down block has resnets (0-1)
-            for j in range(2):
-                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}."] = argument
-                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.conv1"] = argument
-                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.conv2"] = argument
-                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.norm1"] = argument
-                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.norm2"] = argument
-                # conv_shortcut (only in some blocks)
-                arg_dict[f"encoder.down_blocks.{i}.resnets.{j}.conv_shortcut"] = argument
-            
-            # Downsamplers (0-2 have downsample)
-            if i < 3:
-                arg_dict[f"encoder.down_blocks.{i}.downsamplers."] = argument
-                arg_dict[f"encoder.down_blocks.{i}.downsamplers.0.conv"] = argument
-
-        # Encoder middle block
-        arg_dict["encoder.mid_block."] = argument
-        arg_dict["encoder.mid_block.resnets.0."] = argument
-        arg_dict["encoder.mid_block.resnets.0.conv1"] = argument
-        arg_dict["encoder.mid_block.resnets.0.conv2"] = argument
-        arg_dict["encoder.mid_block.resnets.0.norm1"] = argument
-        arg_dict["encoder.mid_block.resnets.0.norm2"] = argument
-        arg_dict["encoder.mid_block.resnets.1."] = argument
-        arg_dict["encoder.mid_block.resnets.1.conv1"] = argument
-        arg_dict["encoder.mid_block.resnets.1.conv2"] = argument
-        arg_dict["encoder.mid_block.resnets.1.norm1"] = argument
-        arg_dict["encoder.mid_block.resnets.1.norm2"] = argument
-        arg_dict["encoder.mid_block.attentions.0."] = argument
-        arg_dict["encoder.mid_block.attentions.0.group_norm"] = argument
-        arg_dict["encoder.mid_block.attentions.0.to_q"] = argument
-        arg_dict["encoder.mid_block.attentions.0.to_k"] = argument
-        arg_dict["encoder.mid_block.attentions.0.to_v"] = argument
-        arg_dict["encoder.mid_block.attentions.0.to_out"] = argument
-
-        # --- Quantization ---
-        arg_dict["quant_conv"] = argument
-        arg_dict["post_quant_conv"] = argument
-
-        # --- Decoder ---
-        arg_dict["decoder.conv_in"] = argument
-        arg_dict["decoder.conv_out"] = argument
-        arg_dict["decoder.conv_norm_out"] = argument
-
-        # Decoder middle block
-        arg_dict["decoder.mid_block."] = argument
-        arg_dict["decoder.mid_block.resnets.0."] = argument
-        arg_dict["decoder.mid_block.resnets.0.conv1"] = argument
-        arg_dict["decoder.mid_block.resnets.0.conv2"] = argument
-        arg_dict["decoder.mid_block.resnets.0.norm1"] = argument
-        arg_dict["decoder.mid_block.resnets.0.norm2"] = argument
-        arg_dict["decoder.mid_block.resnets.1."] = argument
-        arg_dict["decoder.mid_block.resnets.1.conv1"] = argument
-        arg_dict["decoder.mid_block.resnets.1.conv2"] = argument
-        arg_dict["decoder.mid_block.resnets.1.norm1"] = argument
-        arg_dict["decoder.mid_block.resnets.1.norm2"] = argument
-        arg_dict["decoder.mid_block.attentions.0."] = argument
-        arg_dict["decoder.mid_block.attentions.0.group_norm"] = argument
-        arg_dict["decoder.mid_block.attentions.0.to_q"] = argument
-        arg_dict["decoder.mid_block.attentions.0.to_k"] = argument
-        arg_dict["decoder.mid_block.attentions.0.to_v"] = argument
-        arg_dict["decoder.mid_block.attentions.0.to_out"] = argument
-
-        # Decoder up blocks (0-3)
-        for i in range(4):
-            arg_dict[f"decoder.up_blocks.{i}."] = argument
-            # Each up block has resnets (0-2)
-            for j in range(3):
-                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}."] = argument
-                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.conv1"] = argument
-                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.conv2"] = argument
-                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.norm1"] = argument
-                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.norm2"] = argument
-                # conv_shortcut (only in some blocks)
-                arg_dict[f"decoder.up_blocks.{i}.resnets.{j}.conv_shortcut"] = argument
-            
-            # Upsamplers (0-2 have upsample)
-            if i < 3:
-                arg_dict[f"decoder.up_blocks.{i}.upsamplers."] = argument
-                arg_dict[f"decoder.up_blocks.{i}.upsamplers.0.conv"] = argument
-
+        for key in s.LAYER_KEYS:
+            arg_dict[key] = argument
         return {"required": arg_dict}
 
     RETURN_TYPES = ("VAE",)
     FUNCTION = "scale"
     CATEGORY = "advanced/model_merging/model_specific"
-
     DESCRIPTION = "Scale specific layers of FLUX2 VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
 
-    def scale(self, vae, **kwargs):
-        import comfy.sd
-        
-        ratios = {k: v for k, v in kwargs.items() if k != "vae"}
+    # I64など浮動小数点演算できないdtypeを除外
+    _SKIP_DTYPES = {torch.int32, torch.int64, torch.bool}
 
-        # VAEのstate_dictを取得
+    def scale(self, vae, **kwargs):
+        # ComfyUI が "." を "_" に変換する場合に備えて逆引きテーブルを作成
+        kwarg_to_layer = {
+            layer_key.replace(".", "_"): layer_key
+            for layer_key in self.LAYER_KEYS
+        }
+        ratios = {}
+        for k, v in kwargs.items():
+            if k in kwarg_to_layer:
+                ratios[kwarg_to_layer[k]] = v
+            elif k in self.LAYER_KEYS:
+                ratios[k] = v
+
         sd = vae.get_sd()
         new_sd = {}
+        for tensor_key, tensor_val in sd.items():
+            # I64 等の整数テンソルはスケーリング不可のためそのままコピー
+            if tensor_val.dtype in self._SKIP_DTYPES:
+                new_sd[tensor_key] = tensor_val
+                continue
 
-        for k, v in sd.items():
             scale = 1.0
-            matched_arg_len = 0
-
-            # 最も長くマッチするプレフィックスを見つける
+            matched_len = 0
             for arg_name, arg_value in ratios.items():
-                if k.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale = arg_value
-                        matched_arg_len = len(arg_name)
+                if tensor_key.startswith(arg_name) and len(arg_name) > matched_len:
+                    scale = arg_value
+                    matched_len = len(arg_name)
 
-            # スケーリングを適用
-            if scale != 1.0:
-                new_sd[k] = v * scale
-            else:
-                new_sd[k] = v
+            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
 
-        # 新しいVAEを作成
         new_vae = comfy.sd.VAE(sd=new_sd)
-
         return (new_vae,)
 
 
