@@ -4,6 +4,7 @@ import comfy_extras.nodes_model_merging
 import folder_paths
 import json
 import os
+import torch
 from comfy.cli_args import args
 
 
