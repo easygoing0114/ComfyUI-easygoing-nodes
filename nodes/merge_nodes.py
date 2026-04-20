@@ -99,6 +99,7 @@ class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
             arg_dict["single_stream_blocks.{}.".format(i)] = argument
 
         return {"required": arg_dict}
+
     
 class ModelScaleHiDream:
     """
@@ -167,6 +168,7 @@ class ModelScaleHiDream:
                 m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
         
         return (m,)
+
 
 class ModelScaleQwenImage:
     """
@@ -285,6 +287,7 @@ class ModelMergeZImage(comfy_extras.nodes_model_merging.ModelMergeBlocks):
 
         return {"required": arg_dict}
 
+
 class ModelScaleZImage:
     """
     Z-Image Modelの特定の層をスケーリングするノード。
@@ -378,6 +381,7 @@ class ModelScaleZImage:
                 m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
         
         return (m,)
+
     
 class ModelScaleFlux2Klein:
     """
@@ -460,6 +464,98 @@ class ModelScaleFlux2Klein:
                 # W_new = W * 1.0 + W * (scale - 1.0) = W * scale
                 m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
 
+        return (m,)
+
+
+class ModelScaleErnieImage:
+    """
+    ERNIE Image Modelの特定の層をスケーリングするノード。
+    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
+ 
+    対応モデル: ernie-image.safetensors
+    総テンソル数: 409
+    レイヤー構成: layers.0〜35 (36層)
+    """
+ 
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {"model": ("MODEL",)}
+ 
+        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+ 
+        # --- 入力埋め込み系 ---
+        arg_dict["x_embedder."] = argument          # パッチ埋め込み (x_embedder.proj)
+        arg_dict["text_proj."] = argument           # テキスト射影
+        arg_dict["time_embedding."] = argument      # タイムステップ埋め込み (linear_1, linear_2)
+ 
+        # --- Transformer Layers (layers.0〜35) ---
+        for i in range(36):
+            # ブロック全体
+            arg_dict["layers.{}.".format(i)] = argument
+ 
+            # Self-Attention サブコンポーネント
+            arg_dict["layers.{}.self_attention.".format(i)] = argument
+            arg_dict["layers.{}.self_attention.to_q.".format(i)] = argument
+            arg_dict["layers.{}.self_attention.to_k.".format(i)] = argument
+            arg_dict["layers.{}.self_attention.to_v.".format(i)] = argument
+            arg_dict["layers.{}.self_attention.to_out.".format(i)] = argument
+            arg_dict["layers.{}.self_attention.norm_q.".format(i)] = argument
+            arg_dict["layers.{}.self_attention.norm_k.".format(i)] = argument
+ 
+            # MLP サブコンポーネント
+            arg_dict["layers.{}.mlp.".format(i)] = argument
+            arg_dict["layers.{}.mlp.gate_proj.".format(i)] = argument
+            arg_dict["layers.{}.mlp.up_proj.".format(i)] = argument
+            arg_dict["layers.{}.mlp.linear_fc2.".format(i)] = argument
+ 
+            # AdaLN (Adaptive Layer Norm) 変調
+            arg_dict["layers.{}.adaLN_mlp_ln.".format(i)] = argument
+            arg_dict["layers.{}.adaLN_sa_ln.".format(i)] = argument
+ 
+        # --- 出力層 ---
+        arg_dict["adaLN_modulation."] = argument    # 最終AdaLN変調
+        arg_dict["final_norm."] = argument          # 最終正規化
+        arg_dict["final_linear."] = argument        # 最終線形射影
+ 
+        return {"required": arg_dict}
+ 
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+ 
+    def scale(self, model, **kwargs):
+        # モデルの複製
+        m = model.clone()
+ 
+        # スケーリング比率の辞書（'model'キー以外を抽出）
+        ratios = {k: v for k, v in kwargs.items() if k != "model"}
+ 
+        # モデルのパッチ可能なキー（重み）を取得
+        kp = m.get_key_patches("diffusion_model.")
+ 
+        # 全ての重みキーに対してスケーリングを適用
+        for k in kp:
+            scale_value = 1.0
+            # diffusion_model. を除いた純粋なレイヤー名
+            k_unet = k[len("diffusion_model."):]
+ 
+            # 最も長く一致するプレフィックスを探すロジック
+            matched_arg_len = 0
+            for arg_name, arg_value in ratios.items():
+                if k_unet.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale_value = arg_value
+                        matched_arg_len = len(arg_name)
+ 
+            # scale_value != 1.0 のときのみパッチを追加
+            if scale_value != 1.0:
+                # kp[k] は (tensor,) のタプル
+                weight_tensor = kp[k][0]
+                # 元の重みに対して (scale - 1.0) 分をパッチとして追加することで乗算を実現
+                # W_new = W * 1.0 + W * (scale - 1.0) = W * scale
+                m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
+ 
         return (m,)
 
 
@@ -1267,6 +1363,7 @@ NODE_CLASS_MAPPINGS = {
     "ModelMergeZImage": ModelMergeZImage,
     "ModelScaleZImage": ModelScaleZImage,
     "ModelScaleFlux2Klein": ModelScaleFlux2Klein,
+    "ModelScaleErnieImage": ModelScaleErnieImage,
     "CLIPScaleDualSDXLBlock": CLIPScaleDualSDXLBlock,
     "CLIPScaleQwenBlock": CLIPScaleQwenBlock,
     "CLIPSaveQwen": CLIPSaveQwen,
@@ -1288,6 +1385,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ModelMergeZImage": "Model Merge Z-Image",
     "ModelScaleZImage": "Model Scale Z-Image",
     "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
+    "ModelScaleErnieImage": "Model Scale (ERNIE Image)",
     "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
     "CLIPScaleQwenBlock": "CLIP Scale Qwen Block",
     "CLIPSaveQwen": "CLIP Save Qwen (Fix Prefix)",
