@@ -1291,6 +1291,91 @@ class VAEScaleQwenBlock:
         return (new_vae,)
 
 
+class VAEScaleWanVideoBlock:
+    """
+    Wan2.1 VAE の特定の層をスケーリングするノード。
+    scale=1.0 でそのまま、scale=0.0 で完全に抑制。
+ 
+    Wan2.1 VAE のキー構造:
+      - トップレベル: conv1, conv2 (エンコーダー/デコーダー接続用の変換層)
+      - encoder.conv1, encoder.head, encoder.middle.{0,1,2}
+      - encoder.downsamples.{0-10}
+      - decoder.conv1, decoder.head, decoder.middle.{0,1,2}
+      - decoder.upsamples.{0-14}
+ 
+    ComfyUI が INPUT_TYPES のキーの "." を "_" に変換して
+    kwargs に渡すため、逆引きテーブルで復元する。
+    """
+ 
+    LAYER_KEYS = [
+        # トップレベル変換層
+        "conv1.",
+        "conv2.",
+        # Encoder
+        "encoder.conv1.",
+        "encoder.head.",
+        "encoder.middle.",
+        "encoder.middle.0.",
+        "encoder.middle.1.",
+        "encoder.middle.2.",
+        *[f"encoder.downsamples.{i}." for i in range(11)],
+        # Decoder
+        "decoder.conv1.",
+        "decoder.head.",
+        "decoder.middle.",
+        "decoder.middle.0.",
+        "decoder.middle.1.",
+        "decoder.middle.2.",
+        *[f"decoder.upsamples.{i}." for i in range(15)],
+    ]
+ 
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {"vae": ("VAE",)}
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+        for key in s.LAYER_KEYS:
+            arg_dict[key] = argument
+        return {"required": arg_dict}
+ 
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+    DESCRIPTION = (
+        "Scale specific layers of the Wan2.1 VAE. "
+        "Scale=1.0 keeps original weights, Scale=0.0 zeroes out the layer."
+    )
+ 
+    def scale(self, vae, **kwargs):
+        # ComfyUI が "." を "_" に変換する場合に備えて逆引きテーブルを作成
+        kwarg_to_layer = {
+            layer_key.replace(".", "_"): layer_key
+            for layer_key in self.LAYER_KEYS
+        }
+ 
+        ratios = {}
+        for k, v in kwargs.items():
+            if k in kwarg_to_layer:
+                ratios[kwarg_to_layer[k]] = v
+            elif k in self.LAYER_KEYS:
+                ratios[k] = v
+ 
+        sd = vae.get_sd()
+        new_sd = {}
+ 
+        for tensor_key, tensor_val in sd.items():
+            scale = 1.0
+            matched_len = 0
+            # 最長一致でスケールを決定（より具体的なプレフィックスを優先）
+            for prefix, ratio in ratios.items():
+                if tensor_key.startswith(prefix) and len(prefix) > matched_len:
+                    scale = ratio
+                    matched_len = len(prefix)
+ 
+            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
+ 
+        new_vae = comfy.sd.VAE(sd=new_sd)
+        return (new_vae,)
+
 
 class CLIPSaveQwen:
     def __init__(self):
@@ -1375,6 +1460,7 @@ NODE_CLASS_MAPPINGS = {
     "VAEScaleFluxBlock": VAEScaleFluxBlock,
     "VAEScaleFlux2Block": VAEScaleFlux2Block,
     "VAEScaleQwenBlock": VAEScaleQwenBlock,
+    "VAEScaleWanVideo": VAEScaleWanVideoBlock,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1385,10 +1471,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ModelMergeZImage": "Model Merge Z-Image",
     "ModelScaleZImage": "Model Scale Z-Image",
     "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
-    "ModelScaleErnieImage": "Model Scale (ERNIE Image)",
+    "ModelScaleErnieImage": "Model Scale ERNIE Image",
     "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
     "CLIPScaleQwenBlock": "CLIP Scale Qwen Block",
-    "CLIPSaveQwen": "CLIP Save Qwen (Fix Prefix)",
+    "CLIPSaveQwen": "CLIP Save Qwen",
     "VAEMergeSimple": "VAE Merge Simple",
     "VAEMergeSubtract": "VAE Merge Subtract",
     "VAEMergeAdd": "VAE Merge Add",
@@ -1397,4 +1483,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VAEScaleFluxBlock": "VAE Scale FLUX Block",
     "VAEScaleFlux2Block": "VAE Scale FLUX2 Block",
     "VAEScaleQwenBlock": "VAE Scale Qwen Block",
+    "VAEScaleWanVideo": "VAE Scale Wan Video",
 }
