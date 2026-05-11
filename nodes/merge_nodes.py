@@ -559,6 +559,93 @@ class ModelScaleErnieImage:
         return (m,)
 
 
+class ModelScaleHiDreamO1Image:
+    """
+    HiDream-O1-Image (UiT) モデルの特定レイヤーをスケーリングするノード。
+ 
+    対応レイヤー:
+      - model.x_embedder.*
+      - model.t_embedder1.*
+      - model.language_model.layers.{0-35}.*
+      - model.visual.blocks.{0-26}.*
+      - model.visual.merger.*
+      - model.visual.deepstack_merger_list.*
+      - model.visual.patch_embed.*
+      - model.visual.pos_embed.*
+      - model.final_layer2.*
+      - lm_head.*
+    """
+ 
+    @classmethod
+    def INPUT_TYPES(cls):
+        arg_dict = {"model": ("MODEL",)}
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+ 
+        # ── 基本コンポーネント ────────────────────────────────────────
+        arg_dict["model.x_embedder."]   = argument   # 画像パッチ埋め込み
+        arg_dict["model.t_embedder1."]  = argument   # タイムステップ埋め込み
+        arg_dict["model.final_layer2."] = argument   # 最終出力層
+        arg_dict["lm_head."]            = argument   # LM ヘッド
+ 
+        # ── LLM バックボーン layers.0 〜 layers.35 ─────────────────
+        for i in range(36):
+            arg_dict[f"model.language_model.layers.{i}."] = argument
+ 
+        # ── ViT 視覚エンコーダ blocks.0 〜 blocks.26 ───────────────
+        for i in range(27):
+            arg_dict[f"model.visual.blocks.{i}."] = argument
+ 
+        # ── ViT マージャー / 埋め込み ────────────────────────────────
+        arg_dict["model.visual.merger."]                  = argument
+        arg_dict["model.visual.deepstack_merger_list."]   = argument
+        arg_dict["model.visual.patch_embed."]             = argument
+        arg_dict["model.visual.pos_embed."]               = argument
+ 
+        return {"required": arg_dict}
+ 
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+    DESCRIPTION = (
+        "Scale specific layers of HiDream-O1-Image (UiT architecture). "
+        "Supports LLM backbone layers.0-35, ViT visual blocks.0-26, "
+        "embedders, mergers, final layer, and lm_head. "
+        "scale=1.0: unchanged | scale=0.0: zero out | scale>1.0: amplify"
+    )
+ 
+    def scale(self, model, **kwargs):
+        # モデルを複製
+        m = model.clone()
+ 
+        # 'model' キーを除いたスケール比率辞書
+        ratios = {k: v for k, v in kwargs.items() if k != "model"}
+ 
+        # diffusion_model. 以下の全パッチキーを取得
+        kp = m.get_key_patches("diffusion_model.")
+ 
+        for k in kp:
+            # "diffusion_model." プレフィックスを除いた純粋なキー名
+            k_inner = k[len("diffusion_model."):]
+ 
+            # 最長プレフィックス一致でスケール値を決定
+            scale_value = 1.0
+            matched_len = 0
+            for prefix, value in ratios.items():
+                if k_inner.startswith(prefix) and len(prefix) > matched_len:
+                    scale_value = value
+                    matched_len = len(prefix)
+ 
+            # scale=1.0 の場合はパッチ不要
+            if scale_value != 1.0:
+                # add_patches(patches, strength_patch, strength_model)
+                # 出力 = weight * strength_model + patch * strength_patch
+                # スケーリング: weight * scale_value
+                #             = weight * 1.0  +  weight * (scale_value - 1.0)
+                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
+ 
+        return (m,)
+
+
 class CLIPScaleDualSDXLBlock:
     """
     SDXL DualCLIP（CLIP-L + CLIP-G）の特定の層をスケーリングするノード
