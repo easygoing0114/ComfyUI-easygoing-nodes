@@ -561,149 +561,178 @@ class ModelScaleErnieImage:
         return (m,)
 
 
+"""
+ModelScaleHiDreamO1Image
+========================
+HiDream-O1-Image (UiT architecture) の特定レイヤーをスケーリングする ComfyUI カスタムノード。
+
+【設計方針】
+  HiDreamO1ModelLoader が返す HIDREAM_O1_MODEL handle には
+  ComfyUI 標準の ModelPatcher が handle.patcher として格納されている。
+  本ノードはこれを利用し、clone() / get_key_patches() / add_patches() という
+  ComfyUI 正規の API でスケーリングを行う。
+
+  deepcopy・インプレース変更は一切使用しないため安全。
+  patcher.clone() で複製した新しい handle を返すので、
+  ローダーキャッシュのオリジナルは書き換わらない。
+
+HiDream-O1-Image の diffusion_model キー構造:
+  model.language_model.layers.{0-35}.*   LLM バックボーン（36層）
+  model.t_embedder1.*                    タイムステップ埋め込み
+  model.x_embedder.*                     画像パッチ埋め込み
+  model.visual.blocks.{0-26}.*           ViT 視覚エンコーダ（27ブロック）
+  model.visual.merger.*                  ViT マージャー
+  model.visual.deepstack_merger_list.*   ViT ディープスタックマージャー
+  model.visual.patch_embed.*             ViT パッチ埋め込み
+  model.visual.pos_embed.*               ViT 位置埋め込み
+  model.final_layer2.*                   最終出力層
+  lm_head.*                              言語モデルヘッド
+
+scale=1.0 → 変化なし（スキップ）
+scale=0.0 → そのブロックの重みをゼロ化
+scale>1.0 → 強調
+"""
+
 LOGGER = logging.getLogger(__name__)
- 
- 
-def _extract_nn_module(handle):
-    """
-    HiDreamO1ModelLoader が返す handle から nn.Module を取り出す。
-    カスタムノードの実装によって属性名が異なる可能性があるため、
-    複数の候補を順番に試みる。
-    """
-    import torch.nn as nn
- 
-    candidates = [
-        lambda h: h.model,
-        lambda h: h.pipe.transformer,
-        lambda h: h.transformer,
-        lambda h: h,  # handle 自体が nn.Module の場合
-    ]
-    for getter in candidates:
-        try:
-            obj = getter(handle)
-            if isinstance(obj, nn.Module):
-                return obj
-        except AttributeError:
-            continue
- 
-    raise ValueError(
-        "ModelScaleHiDreamO1Image: HIDREAM_O1_MODEL handle から nn.Module を "
-        "取り出せませんでした。handle の属性: "
-        + str([a for a in dir(handle) if not a.startswith("__")])
-    )
- 
- 
-def _resolve_scale(key: str, ratios: dict) -> float:
-    """
-    state_dict のキーに対して最長プレフィックス一致でスケール値を返す。
-    マッチしない場合は 1.0 を返す。
-    """
+
+
+def _resolve_scale(k_inner: str, ratios: dict) -> float:
+    """最長プレフィックス一致でスケール値を返す。マッチなしは 1.0。"""
     scale_value = 1.0
     matched_len = 0
     for prefix, value in ratios.items():
-        if key.startswith(prefix) and len(prefix) > matched_len:
+        if k_inner.startswith(prefix) and len(prefix) > matched_len:
             scale_value = value
             matched_len = len(prefix)
     return scale_value
- 
- 
+
+
 class ModelScaleHiDreamO1Image:
     """
     HiDream-O1-Image (UiT / HIDREAM_O1_MODEL) の特定レイヤーをスケーリングするノード。
- 
+
     入力型:  HIDREAM_O1_MODEL  （HiDreamO1ModelLoader の出力と直結）
-    出力型:  HIDREAM_O1_MODEL  （スケーリング済み handle をそのまま返す）
- 
+    出力型:  HIDREAM_O1_MODEL  （patcher.clone() した新しい handle を返す）
+
     処理フロー:
-      1. handle を deepcopy してオリジナルを保護
-      2. deepcopy した handle から nn.Module を取り出す
-      3. state_dict を走査し、プレフィックス一致でスケール値を決定
-      4. scale != 1.0 の tensor に対してインプレースで乗算
-      5. スケーリング済み state_dict を module に load_state_dict
-      6. handle を返す
+      1. handle.patcher (ModelPatcher) を取得
+      2. patcher.clone() でオリジナルを保護した複製を作成
+      3. get_key_patches("diffusion_model.") で重みキーを列挙
+      4. 最長プレフィックス一致で scale 値を決定
+      5. scale != 1.0 のキーに add_patches() を適用
+         出力 = weight * 1.0 + weight * (scale - 1.0) = weight * scale
+      6. clone した patcher を handle.clone_with_patcher() で包んで返す
+         ※ clone_with_patcher が無い場合は patcher を差し替えて返す
     """
- 
+
     @classmethod
     def INPUT_TYPES(cls):
         arg_dict = {"hidream_model": ("HIDREAM_O1_MODEL",)}
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
- 
+
         # ── 基本コンポーネント ────────────────────────────────────────
-        arg_dict["model.x_embedder."]   = argument   # 画像パッチ埋め込み
-        arg_dict["model.t_embedder1."]  = argument   # タイムステップ埋め込み
-        arg_dict["model.final_layer2."] = argument   # 最終出力層
-        arg_dict["lm_head."]            = argument   # LM ヘッド
- 
+        arg_dict["model.x_embedder."]   = argument
+        arg_dict["model.t_embedder1."]  = argument
+        arg_dict["model.final_layer2."] = argument
+        arg_dict["lm_head."]            = argument
+
         # ── LLM バックボーン layers.0 〜 layers.35 ─────────────────
         for i in range(36):
             arg_dict[f"model.language_model.layers.{i}."] = argument
- 
+
         # ── ViT 視覚エンコーダ blocks.0 〜 blocks.26 ───────────────
         for i in range(27):
             arg_dict[f"model.visual.blocks.{i}."] = argument
- 
+
         # ── ViT マージャー / 埋め込み ────────────────────────────────
         arg_dict["model.visual.merger."]                = argument
         arg_dict["model.visual.deepstack_merger_list."] = argument
         arg_dict["model.visual.patch_embed."]           = argument
         arg_dict["model.visual.pos_embed."]             = argument
- 
+
         return {"required": arg_dict}
- 
+
     RETURN_TYPES = ("HIDREAM_O1_MODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "scale"
     CATEGORY = "HiDream O1"
     DESCRIPTION = (
         "Scale specific layers of HiDream-O1-Image (UiT architecture). "
-        "Input/output type is HIDREAM_O1_MODEL (connects directly to HiDreamO1ModelLoader). "
-        "Supports LLM backbone layers.0-35, ViT visual blocks.0-26, "
-        "embedders, mergers, final layer, and lm_head. "
+        "Uses handle.patcher (ModelPatcher) — safe, no deepcopy, no in-place mutation. "
         "scale=1.0: unchanged | scale=0.0: zero out | scale>1.0: amplify"
     )
- 
+
     def scale(self, hidream_model, **kwargs):
-        # ── スケール比率辞書を構築 ─────────────────────────────────
+        # scale=1.0 以外のみ辞書に残す
         ratios = {k: v for k, v in kwargs.items() if v != 1.0}
- 
-        # 全スケールが 1.0 なら何もしない（コスト節約）
+
         if not ratios:
-            LOGGER.info("ModelScaleHiDreamO1Image: all scales are 1.0, returning as-is.")
+            LOGGER.info("ModelScaleHiDreamO1Image: all scales are 1.0, skipping.")
             return (hidream_model,)
- 
-        # ── handle を deepcopy してオリジナルを保護 ─────────────────
-        scaled_handle = copy.deepcopy(hidream_model)
- 
-        # ── handle から nn.Module を取り出す ──────────────────────
-        module = _extract_nn_module(scaled_handle)
- 
-        # ── state_dict を取得してスケーリング ─────────────────────
-        sd = module.state_dict()
-        scaled_sd = {}
-        modified_count = 0
- 
-        for key, tensor in sd.items():
-            sv = _resolve_scale(key, ratios)
-            if sv != 1.0 and tensor.is_floating_point():
-                scaled_sd[key] = tensor * sv
-                modified_count += 1
-            else:
-                scaled_sd[key] = tensor
- 
+
+        # ── handle.patcher（ModelPatcher）を取得・clone ───────────
+        patcher = hidream_model.patcher
+        m = patcher.clone()
+
+        # ── 全キーを取得し、実際のプレフィックスを自動検出 ────────
+        # HiDream-O1-Image は "diffusion_model." プレフィックスを使わない場合がある。
+        # 空文字で全キーを取得し、先頭キーからプレフィックスを判定する。
+        kp_all = m.get_key_patches("")
+
+        # プレフィックス候補を優先順に試す
+        PREFIX_CANDIDATES = [
+            "diffusion_model.",  # 標準 ComfyUI
+            "model.",            # HiDream-O1-Image がそのまま格納している場合
+        ]
+        detected_prefix = ""
+        for candidate in PREFIX_CANDIDATES:
+            if any(k.startswith(candidate) for k in kp_all):
+                detected_prefix = candidate
+                break
+
         LOGGER.info(
-            "ModelScaleHiDreamO1Image: scaled %d / %d tensors.",
-            modified_count, len(sd),
+            "ModelScaleHiDreamO1Image: detected key prefix=%r, total keys=%d",
+            detected_prefix, len(kp_all),
         )
- 
-        # ── スケーリング済み state_dict をモジュールに戻す ─────────
-        # strict=False: 万が一キーが一致しない場合でもエラーにしない
-        missing, unexpected = module.load_state_dict(scaled_sd, strict=False)
-        if missing:
-            LOGGER.warning("ModelScaleHiDreamO1Image: missing keys: %s", missing)
-        if unexpected:
-            LOGGER.warning("ModelScaleHiDreamO1Image: unexpected keys: %s", unexpected)
- 
-        return (scaled_handle,)
+
+        # プレフィックスで絞り込む（"" の場合は全キー）
+        if detected_prefix:
+            kp = {k: v for k, v in kp_all.items() if k.startswith(detected_prefix)}
+        else:
+            kp = kp_all
+
+        modified = 0
+        for k in kp:
+            # プレフィックスを除いた純粋なキー名でスケール照合
+            k_inner = k[len(detected_prefix):]
+
+            sv = _resolve_scale(k_inner, ratios)
+            if sv != 1.0:
+                # add_patches(patches, strength_patch, strength_model)
+                # 出力 = weight * strength_model + patch * strength_patch
+                # スケーリング: weight * sv
+                #             = weight * 1.0  +  weight * (sv - 1.0)
+                m.add_patches({k: kp[k]}, sv - 1.0, 1.0)
+                modified += 1
+
+        LOGGER.info("ModelScaleHiDreamO1Image: patched %d / %d keys.", modified, len(kp))
+
+        # ── clone した patcher を handle に包んで返す ──────────────
+        # handle.clone_with_patcher(patcher) があればそれを使う。
+        # なければ patcher を差し替えて返す（フォールバック）。
+        try:
+            result_handle = hidream_model.clone_with_patcher(m)
+        except (AttributeError, TypeError):
+            LOGGER.warning(
+                "ModelScaleHiDreamO1Image: clone_with_patcher() が使えません。"
+                "handle.patcher を直接差し替えます（オリジナルが変更されます）。"
+            )
+            hidream_model.patcher = m
+            result_handle = hidream_model
+
+        return (result_handle,)
+
+
 
 class CLIPScaleDualSDXLBlock:
     """
