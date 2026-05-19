@@ -565,17 +565,13 @@ class ModelScaleErnieImage:
 ModelScaleHiDreamO1Image
 ========================
 HiDream-O1-Image (UiT architecture) の特定レイヤーをスケーリングする ComfyUI カスタムノード。
-
 【設計方針】
-  HiDreamO1ModelLoader が返す HIDREAM_O1_MODEL handle には
-  ComfyUI 標準の ModelPatcher が handle.patcher として格納されている。
-  本ノードはこれを利用し、clone() / get_key_patches() / add_patches() という
+  ComfyUI 標準の MODEL (ModelPatcher) を input/output に使用する。
+  clone() / get_key_patches() / add_patches() という
   ComfyUI 正規の API でスケーリングを行う。
-
   deepcopy・インプレース変更は一切使用しないため安全。
-  patcher.clone() で複製した新しい handle を返すので、
+  patcher.clone() で複製した新しい MODEL を返すので、
   ローダーキャッシュのオリジナルは書き換わらない。
-
 HiDream-O1-Image の diffusion_model キー構造:
   model.language_model.layers.{0-35}.*   LLM バックボーン（36層）
   model.t_embedder1.*                    タイムステップ埋め込み
@@ -587,11 +583,12 @@ HiDream-O1-Image の diffusion_model キー構造:
   model.visual.pos_embed.*               ViT 位置埋め込み
   model.final_layer2.*                   最終出力層
   lm_head.*                              言語モデルヘッド
-
 scale=1.0 → 変化なし（スキップ）
 scale=0.0 → そのブロックの重みをゼロ化
 scale>1.0 → 強調
 """
+
+import logging
 
 LOGGER = logging.getLogger(__name__)
 
@@ -609,76 +606,74 @@ def _resolve_scale(k_inner: str, ratios: dict) -> float:
 
 class ModelScaleHiDreamO1Image:
     """
-    HiDream-O1-Image (UiT / HIDREAM_O1_MODEL) の特定レイヤーをスケーリングするノード。
-
-    入力型:  HIDREAM_O1_MODEL  （HiDreamO1ModelLoader の出力と直結）
-    出力型:  HIDREAM_O1_MODEL  （patcher.clone() した新しい handle を返す）
-
+    HiDream-O1-Image (UiT / MODEL) の特定レイヤーをスケーリングするノード。
+    入力型:  MODEL  （ComfyUI 標準 ModelPatcher）
+    出力型:  MODEL  （patcher.clone() した新しい MODEL を返す）
     処理フロー:
-      1. handle.patcher (ModelPatcher) を取得
+      1. model (ModelPatcher) を取得
+         ※ model.patcher を持つ場合はそれを使用、そうでなければ model 自体を使用
       2. patcher.clone() でオリジナルを保護した複製を作成
       3. get_key_patches("diffusion_model.") で重みキーを列挙
       4. 最長プレフィックス一致で scale 値を決定
       5. scale != 1.0 のキーに add_patches() を適用
          出力 = weight * 1.0 + weight * (scale - 1.0) = weight * scale
-      6. clone した patcher を handle.clone_with_patcher() で包んで返す
-         ※ clone_with_patcher が無い場合は patcher を差し替えて返す
+      6. clone した patcher を返す
+         clone_with_patcher() があればそれを使用、なければフォールバック
     """
 
     @classmethod
     def INPUT_TYPES(cls):
-        arg_dict = {"hidream_model": ("HIDREAM_O1_MODEL",)}
+        arg_dict = {"model": ("MODEL",)}
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
         # ── 基本コンポーネント ────────────────────────────────────────
         arg_dict["model.x_embedder."]   = argument
         arg_dict["model.t_embedder1."]  = argument
         arg_dict["model.final_layer2."] = argument
         arg_dict["lm_head."]            = argument
-
         # ── LLM バックボーン layers.0 〜 layers.35 ─────────────────
         for i in range(36):
             arg_dict[f"model.language_model.layers.{i}."] = argument
-
         # ── ViT 視覚エンコーダ blocks.0 〜 blocks.26 ───────────────
         for i in range(27):
             arg_dict[f"model.visual.blocks.{i}."] = argument
-
         # ── ViT マージャー / 埋め込み ────────────────────────────────
         arg_dict["model.visual.merger."]                = argument
         arg_dict["model.visual.deepstack_merger_list."] = argument
         arg_dict["model.visual.patch_embed."]           = argument
         arg_dict["model.visual.pos_embed."]             = argument
-
         return {"required": arg_dict}
 
-    RETURN_TYPES = ("HIDREAM_O1_MODEL",)
+    RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "scale"
     CATEGORY = "HiDream O1"
     DESCRIPTION = (
         "Scale specific layers of HiDream-O1-Image (UiT architecture). "
-        "Uses handle.patcher (ModelPatcher) — safe, no deepcopy, no in-place mutation. "
+        "Uses ModelPatcher — safe, no deepcopy, no in-place mutation. "
         "scale=1.0: unchanged | scale=0.0: zero out | scale>1.0: amplify"
     )
 
-    def scale(self, hidream_model, **kwargs):
+    def scale(self, model, **kwargs):
         # scale=1.0 以外のみ辞書に残す
         ratios = {k: v for k, v in kwargs.items() if v != 1.0}
-
         if not ratios:
             LOGGER.info("ModelScaleHiDreamO1Image: all scales are 1.0, skipping.")
-            return (hidream_model,)
+            return (model,)
 
-        # ── handle.patcher（ModelPatcher）を取得・clone ───────────
-        patcher = hidream_model.patcher
+        # ── patcher（ModelPatcher）を取得・clone ──────────────────
+        # 標準 MODEL は ModelPatcher を直接渡すケースと、
+        # .patcher 属性経由で格納するケースがある。
+        if hasattr(model, "patcher"):
+            patcher = model.patcher
+        else:
+            patcher = model
+
         m = patcher.clone()
 
         # ── 全キーを取得し、実際のプレフィックスを自動検出 ────────
         # HiDream-O1-Image は "diffusion_model." プレフィックスを使わない場合がある。
         # 空文字で全キーを取得し、先頭キーからプレフィックスを判定する。
         kp_all = m.get_key_patches("")
-
         # プレフィックス候補を優先順に試す
         PREFIX_CANDIDATES = [
             "diffusion_model.",  # 標準 ComfyUI
@@ -705,7 +700,6 @@ class ModelScaleHiDreamO1Image:
         for k in kp:
             # プレフィックスを除いた純粋なキー名でスケール照合
             k_inner = k[len(detected_prefix):]
-
             sv = _resolve_scale(k_inner, ratios)
             if sv != 1.0:
                 # add_patches(patches, strength_patch, strength_model)
@@ -717,20 +711,22 @@ class ModelScaleHiDreamO1Image:
 
         LOGGER.info("ModelScaleHiDreamO1Image: patched %d / %d keys.", modified, len(kp))
 
-        # ── clone した patcher を handle に包んで返す ──────────────
-        # handle.clone_with_patcher(patcher) があればそれを使う。
-        # なければ patcher を差し替えて返す（フォールバック）。
+        # ── clone した patcher を返す ──────────────────────────────
         try:
-            result_handle = hidream_model.clone_with_patcher(m)
+            result = model.clone_with_patcher(m)
         except (AttributeError, TypeError):
-            LOGGER.warning(
-                "ModelScaleHiDreamO1Image: clone_with_patcher() が使えません。"
-                "handle.patcher を直接差し替えます（オリジナルが変更されます）。"
-            )
-            hidream_model.patcher = m
-            result_handle = hidream_model
+            try:
+                # ModelPatcher 自体が MODEL として機能する場合はそのまま返す
+                result = m
+            except Exception:
+                LOGGER.warning(
+                    "ModelScaleHiDreamO1Image: フォールバック。patcher を直接差し替えます。"
+                )
+                if hasattr(model, "patcher"):
+                    model.patcher = m
+                result = model
 
-        return (result_handle,)
+        return (result,)
 
 
 
