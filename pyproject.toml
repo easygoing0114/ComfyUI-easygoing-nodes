@@ -1,9 +1,8 @@
 [project]
 name = "comfyui-easygoing-nodes"
 description = "Experimental Text Encoder module, HDR Effects with LAB adjusts, Image Difference checker nodes by easygoing0114"
-version = "1.6.1"
+version = "1.6.2"
 license = { file = "LICENSE" }
-dependencies  = [] # Filled in from requirements.txt
 
 [project.urls]
 Repository = "https://github.com/easygoing0114/ComfyUI-easygoing-nodes"
