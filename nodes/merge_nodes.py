@@ -604,43 +604,55 @@ def _resolve_scale(k_inner: str, ratios: dict) -> float:
     return scale_value
 
 
-class ModelScaleHiDreamO1Image:
-    """
-    HiDream-O1-Image (UiT / MODEL) の特定レイヤーをスケーリングするノード。
-    入力型:  MODEL  （ComfyUI 標準 ModelPatcher）
-    出力型:  MODEL  （patcher.clone() した新しい MODEL を返す）
-    処理フロー:
-      1. model (ModelPatcher) を取得
-         ※ model.patcher を持つ場合はそれを使用、そうでなければ model 自体を使用
-      2. patcher.clone() でオリジナルを保護した複製を作成
-      3. get_key_patches("diffusion_model.") で重みキーを列挙
-      4. 最長プレフィックス一致で scale 値を決定
-      5. scale != 1.0 のキーに add_patches() を適用
-         出力 = weight * 1.0 + weight * (scale - 1.0) = weight * scale
-      6. clone した patcher を返す
-         clone_with_patcher() があればそれを使用、なければフォールバック
-    """
+"""
+ModelScaleHiDreamO1Image
+========================
+修正版 - get_key_patches の呼び出し方法とキーマッチングを修正
+"""
+import logging
+LOGGER = logging.getLogger(__name__)
 
+
+def _resolve_scale(k_inner: str, ratios: dict) -> float:
+    """最長プレフィックス一致でスケール値を返す。マッチなしは 1.0。"""
+    scale_value = 1.0
+    matched_len = 0
+    for prefix, value in ratios.items():
+        if k_inner.startswith(prefix) and len(prefix) > matched_len:
+            scale_value = value
+            matched_len = len(prefix)
+    return scale_value
+
+
+class ModelScaleHiDreamO1Image:
     @classmethod
     def INPUT_TYPES(cls):
         arg_dict = {"model": ("MODEL",)}
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-        # ── 基本コンポーネント ────────────────────────────────────────
-        arg_dict["model.x_embedder."]   = argument
-        arg_dict["model.t_embedder1."]  = argument
-        arg_dict["model.final_layer2."] = argument
-        arg_dict["lm_head."]            = argument
-        # ── LLM バックボーン layers.0 〜 layers.35 ─────────────────
+
+        # ── 基本コンポーネント ─────────────────────────────────────────
+        # 修正前: "model.x_embedder."   → 修正後: "x_embedder."
+        arg_dict["x_embedder."]   = argument
+        arg_dict["t_embedder1."]  = argument
+        arg_dict["final_layer2."] = argument
+        arg_dict["lm_head."]      = argument
+
+        # ── LLM バックボーン layers.0 〜 layers.35 ────────────────────
+        # 修正前: "model.language_model.layers.{i}." → 修正後: "language_model.layers.{i}."
         for i in range(36):
-            arg_dict[f"model.language_model.layers.{i}."] = argument
-        # ── ViT 視覚エンコーダ blocks.0 〜 blocks.26 ───────────────
+            arg_dict[f"language_model.layers.{i}."] = argument
+
+        # ── ViT 視覚エンコーダ blocks.0 〜 blocks.26 ──────────────────
+        # 修正前: "model.visual.blocks.{i}." → 修正後: "visual.blocks.{i}."
         for i in range(27):
-            arg_dict[f"model.visual.blocks.{i}."] = argument
-        # ── ViT マージャー / 埋め込み ────────────────────────────────
-        arg_dict["model.visual.merger."]                = argument
-        arg_dict["model.visual.deepstack_merger_list."] = argument
-        arg_dict["model.visual.patch_embed."]           = argument
-        arg_dict["model.visual.pos_embed."]             = argument
+            arg_dict[f"visual.blocks.{i}."] = argument
+
+        # ── ViT マージャー / 埋め込み ──────────────────────────────────
+        arg_dict["visual.merger."]                = argument
+        arg_dict["visual.deepstack_merger_list."] = argument
+        arg_dict["visual.patch_embed."]           = argument
+        arg_dict["visual.pos_embed."]             = argument
+
         return {"required": arg_dict}
 
     RETURN_TYPES = ("MODEL",)
@@ -654,15 +666,12 @@ class ModelScaleHiDreamO1Image:
     )
 
     def scale(self, model, **kwargs):
-        # scale=1.0 以外のみ辞書に残す
         ratios = {k: v for k, v in kwargs.items() if v != 1.0}
         if not ratios:
             LOGGER.info("ModelScaleHiDreamO1Image: all scales are 1.0, skipping.")
             return (model,)
 
-        # ── patcher（ModelPatcher）を取得・clone ──────────────────
-        # 標準 MODEL は ModelPatcher を直接渡すケースと、
-        # .patcher 属性経由で格納するケースがある。
+        # patcher を取得
         if hasattr(model, "patcher"):
             patcher = model.patcher
         else:
@@ -670,17 +679,35 @@ class ModelScaleHiDreamO1Image:
 
         m = patcher.clone()
 
-        # ── 全キーを取得し、実際のプレフィックスを自動検出 ────────
-        # HiDream-O1-Image は "diffusion_model." プレフィックスを使わない場合がある。
-        # 空文字で全キーを取得し、先頭キーからプレフィックスを判定する。
-        kp_all = m.get_key_patches("")
-        # プレフィックス候補を優先順に試す
+        # ── キー取得：引数なしで呼ぶのが最も安全 ──────────────────
+        # get_key_patches() は引数なしだと全キーを返す実装が多い。
+        # "" を渡すと ComfyUI バージョンによっては空になる場合がある。
+        try:
+            # まず引数なし（推奨）
+            kp_all = m.get_key_patches()
+        except TypeError:
+            # 古いバージョンは引数必須の場合がある
+            kp_all = m.get_key_patches("")
+
+        if not kp_all:
+            LOGGER.warning("ModelScaleHiDreamO1Image: get_key_patches() returned empty dict.")
+            return (model,)
+
+        # ── 実キーからプレフィックスを自動検出 ───────────────────
+        # 実際のキーを数件サンプリングしてログ出力（デバッグ用）
+        sample_keys = list(kp_all.keys())[:5]
+        LOGGER.info("ModelScaleHiDreamO1Image: sample keys = %s", sample_keys)
+
         PREFIX_CANDIDATES = [
-            "diffusion_model.",  # 標準 ComfyUI
-            "model.",            # HiDream-O1-Image がそのまま格納している場合
+            "diffusion_model.",
+            "model.",
+            "",
         ]
         detected_prefix = ""
         for candidate in PREFIX_CANDIDATES:
+            if candidate == "":
+                detected_prefix = ""
+                break
             if any(k.startswith(candidate) for k in kp_all):
                 detected_prefix = candidate
                 break
@@ -690,44 +717,36 @@ class ModelScaleHiDreamO1Image:
             detected_prefix, len(kp_all),
         )
 
-        # プレフィックスで絞り込む（"" の場合は全キー）
+        # プレフィックスで絞り込み
         if detected_prefix:
             kp = {k: v for k, v in kp_all.items() if k.startswith(detected_prefix)}
         else:
             kp = kp_all
 
         modified = 0
-        for k in kp:
-            # プレフィックスを除いた純粋なキー名でスケール照合
+        for k, patch_value in kp.items():
             k_inner = k[len(detected_prefix):]
             sv = _resolve_scale(k_inner, ratios)
-            if sv != 1.0:
-                # add_patches(patches, strength_patch, strength_model)
-                # 出力 = weight * strength_model + patch * strength_patch
-                # スケーリング: weight * sv
-                #             = weight * 1.0  +  weight * (sv - 1.0)
-                m.add_patches({k: kp[k]}, sv - 1.0, 1.0)
-                modified += 1
+            if sv == 1.0:
+                continue
 
-        LOGGER.info("ModelScaleHiDreamO1Image: patched %d / %d keys.", modified, len(kp))
+            # add_patches の第1引数は {key: patch_tuple} の辞書
+            # patch_tuple は get_key_patches() が返した値をそのまま使う
+            m.add_patches({k: patch_value}, sv - 1.0, 1.0)
+            modified += 1
 
-        # ── clone した patcher を返す ──────────────────────────────
+        LOGGER.info(
+            "ModelScaleHiDreamO1Image: patched %d / %d keys.",
+            modified, len(kp)
+        )
+
+        # 結果を返す
         try:
             result = model.clone_with_patcher(m)
         except (AttributeError, TypeError):
-            try:
-                # ModelPatcher 自体が MODEL として機能する場合はそのまま返す
-                result = m
-            except Exception:
-                LOGGER.warning(
-                    "ModelScaleHiDreamO1Image: フォールバック。patcher を直接差し替えます。"
-                )
-                if hasattr(model, "patcher"):
-                    model.patcher = m
-                result = model
+            result = m
 
         return (result,)
-
 
 
 class CLIPScaleDualSDXLBlock:
