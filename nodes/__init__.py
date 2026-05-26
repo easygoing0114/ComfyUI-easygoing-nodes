@@ -7,6 +7,7 @@ nodes パッケージ
   merge_nodes.py                  : マージ用ノード
   text_encode_nodes.py            : テキストエンコードノード
   image_difference_checker_nodes.py: 画像差分チェッカーノード
+  model_load_save_nodes.py        : モデルのオリジナル構造を保持したロード・セーブノード
 """
 
 from .color_nodes import (
@@ -29,6 +30,10 @@ from .image_difference_checker_nodes import (
     NODE_CLASS_MAPPINGS as IMAGE_DIFF_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as IMAGE_DIFF_DISPLAY_MAPPINGS,
 )
+from .model_load_save_nodes import (
+    NODE_CLASS_MAPPINGS as LOAD_SAVE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as LOAD_SAVE_DISPLAY_MAPPINGS,
+)
 
 NODE_CLASS_MAPPINGS = {
     **COLOR_CLASS_MAPPINGS,
@@ -36,6 +41,7 @@ NODE_CLASS_MAPPINGS = {
     **MERGE_CLASS_MAPPINGS,
     **TEXT_ENCODE_CLASS_MAPPINGS,
     **IMAGE_DIFF_CLASS_MAPPINGS,
+    **LOAD_SAVE_CLASS_MAPPINGS,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -44,6 +50,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **MERGE_DISPLAY_MAPPINGS,
     **TEXT_ENCODE_DISPLAY_MAPPINGS,
     **IMAGE_DIFF_DISPLAY_MAPPINGS,
+    **LOAD_SAVE_DISPLAY_MAPPINGS,
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

@@ -86,6 +86,10 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Update History
 
+### 2026.5.26
+
+- Add `Load Original Model` and `Model Save with Original` node.
+
 ### 2026.4.16
 
 - Add `Image Difference Checker` node.
