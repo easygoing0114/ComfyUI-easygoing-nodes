@@ -607,12 +607,11 @@ def _resolve_scale(k_inner: str, ratios: dict) -> float:
 """
 ModelScaleHiDreamO1Image
 ========================
-修正版 - get_key_patches の呼び出し方法とキーマッチングを修正
+修正版 - 全テンソルをログに出力するよう変更
 """
 import logging
 LOGGER = logging.getLogger(__name__)
-
-
+ 
 def _resolve_scale(k_inner: str, ratios: dict) -> float:
     """最長プレフィックス一致でスケール値を返す。マッチなしは 1.0。"""
     scale_value = 1.0
@@ -622,39 +621,36 @@ def _resolve_scale(k_inner: str, ratios: dict) -> float:
             scale_value = value
             matched_len = len(prefix)
     return scale_value
-
-
+ 
+ 
 class ModelScaleHiDreamO1Image:
     @classmethod
     def INPUT_TYPES(cls):
         arg_dict = {"model": ("MODEL",)}
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
+ 
         # ── 基本コンポーネント ─────────────────────────────────────────
-        # 修正前: "model.x_embedder."   → 修正後: "x_embedder."
         arg_dict["x_embedder."]   = argument
         arg_dict["t_embedder1."]  = argument
         arg_dict["final_layer2."] = argument
         arg_dict["lm_head."]      = argument
-
+ 
         # ── LLM バックボーン layers.0 〜 layers.35 ────────────────────
-        # 修正前: "model.language_model.layers.{i}." → 修正後: "language_model.layers.{i}."
         for i in range(36):
             arg_dict[f"language_model.layers.{i}."] = argument
-
+ 
         # ── ViT 視覚エンコーダ blocks.0 〜 blocks.26 ──────────────────
-        # 修正前: "model.visual.blocks.{i}." → 修正後: "visual.blocks.{i}."
         for i in range(27):
             arg_dict[f"visual.blocks.{i}."] = argument
-
+ 
         # ── ViT マージャー / 埋め込み ──────────────────────────────────
         arg_dict["visual.merger."]                = argument
         arg_dict["visual.deepstack_merger_list."] = argument
         arg_dict["visual.patch_embed."]           = argument
         arg_dict["visual.pos_embed."]             = argument
-
+ 
         return {"required": arg_dict}
-
+ 
     RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "scale"
@@ -664,40 +660,40 @@ class ModelScaleHiDreamO1Image:
         "Uses ModelPatcher — safe, no deepcopy, no in-place mutation. "
         "scale=1.0: unchanged | scale=0.0: zero out | scale>1.0: amplify"
     )
-
+ 
     def scale(self, model, **kwargs):
         ratios = {k: v for k, v in kwargs.items() if v != 1.0}
         if not ratios:
             LOGGER.info("ModelScaleHiDreamO1Image: all scales are 1.0, skipping.")
             return (model,)
-
+ 
         # patcher を取得
         if hasattr(model, "patcher"):
             patcher = model.patcher
         else:
             patcher = model
-
+ 
         m = patcher.clone()
-
-        # ── キー取得：引数なしで呼ぶのが最も安全 ──────────────────
-        # get_key_patches() は引数なしだと全キーを返す実装が多い。
-        # "" を渡すと ComfyUI バージョンによっては空になる場合がある。
+ 
+        # ── キー取得 ──────────────────────────────────────────────────
         try:
-            # まず引数なし（推奨）
             kp_all = m.get_key_patches()
         except TypeError:
-            # 古いバージョンは引数必須の場合がある
             kp_all = m.get_key_patches("")
-
+ 
         if not kp_all:
             LOGGER.warning("ModelScaleHiDreamO1Image: get_key_patches() returned empty dict.")
             return (model,)
-
-        # ── 実キーからプレフィックスを自動検出 ───────────────────
-        # 実際のキーを数件サンプリングしてログ出力（デバッグ用）
-        sample_keys = list(kp_all.keys())[:5]
-        LOGGER.info("ModelScaleHiDreamO1Image: sample keys = %s", sample_keys)
-
+ 
+        # ── 全テンソルキーをログ出力 ──────────────────────────────────
+        all_keys = list(kp_all.keys())
+        LOGGER.info(
+            "ModelScaleHiDreamO1Image: all keys (%d total):\n%s",
+            len(all_keys),
+            "\n".join(f"  [{i:>5}] {k}" for i, k in enumerate(all_keys)),
+        )
+ 
+        # ── 実キーからプレフィックスを自動検出 ───────────────────────
         PREFIX_CANDIDATES = [
             "diffusion_model.",
             "model.",
@@ -711,41 +707,52 @@ class ModelScaleHiDreamO1Image:
             if any(k.startswith(candidate) for k in kp_all):
                 detected_prefix = candidate
                 break
-
+ 
         LOGGER.info(
             "ModelScaleHiDreamO1Image: detected key prefix=%r, total keys=%d",
             detected_prefix, len(kp_all),
         )
-
+ 
         # プレフィックスで絞り込み
         if detected_prefix:
             kp = {k: v for k, v in kp_all.items() if k.startswith(detected_prefix)}
         else:
             kp = kp_all
-
+ 
         modified = 0
+        patched_keys = []
+ 
         for k, patch_value in kp.items():
             k_inner = k[len(detected_prefix):]
             sv = _resolve_scale(k_inner, ratios)
             if sv == 1.0:
                 continue
-
-            # add_patches の第1引数は {key: patch_tuple} の辞書
-            # patch_tuple は get_key_patches() が返した値をそのまま使う
+ 
             m.add_patches({k: patch_value}, sv - 1.0, 1.0)
             modified += 1
-
+            patched_keys.append((k, sv))
+ 
+        # ── スケーリングした全テンソルをログ出力 ──────────────────────
+        if patched_keys:
+            LOGGER.info(
+                "ModelScaleHiDreamO1Image: patched keys (%d total):\n%s",
+                len(patched_keys),
+                "\n".join(f"  scale={sv:.4f}  {k}" for k, sv in patched_keys),
+            )
+        else:
+            LOGGER.info("ModelScaleHiDreamO1Image: no keys were patched.")
+ 
         LOGGER.info(
             "ModelScaleHiDreamO1Image: patched %d / %d keys.",
-            modified, len(kp)
+            modified, len(kp),
         )
-
+ 
         # 結果を返す
         try:
             result = model.clone_with_patcher(m)
         except (AttributeError, TypeError):
             result = m
-
+ 
         return (result,)
 
 
