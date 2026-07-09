@@ -384,6 +384,91 @@ class ModelScaleZImage:
         
         return (m,)
 
+
+class ModelScaleKrea2:
+    """
+    Krea2系モデルの特定の層をスケーリングするノード。
+    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
+ 
+    対応レイヤー:
+      - img_in / time_embed / time_mod_proj / txt_in / final_layer (基本コンポーネント)
+      - text_fusion.projector
+      - text_fusion.layerwise_blocks 0-1
+      - text_fusion.refiner_blocks 0-1
+      - transformer_blocks 0-27 (メインDiTブロック)
+    """
+ 
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = {"model": ("MODEL",)}
+        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+ 
+        # 基本コンポーネント
+        arg_dict["img_in."] = argument
+        arg_dict["time_embed."] = argument
+        arg_dict["time_mod_proj."] = argument
+        arg_dict["txt_in."] = argument
+        arg_dict["final_layer."] = argument
+ 
+        # text_fusion 内の各コンポーネント
+        arg_dict["text_fusion.projector."] = argument
+ 
+        # text_fusion.layerwise_blocks (0-1)
+        for i in range(2):
+            arg_dict["text_fusion.layerwise_blocks.{}.".format(i)] = argument
+ 
+        # text_fusion.refiner_blocks (0-1)
+        for i in range(2):
+            arg_dict["text_fusion.refiner_blocks.{}.".format(i)] = argument
+ 
+        # transformer_blocks (0-27)
+        for i in range(28):
+            arg_dict["transformer_blocks.{}.".format(i)] = argument
+ 
+        return {"required": arg_dict}
+ 
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "scale"
+    CATEGORY = "advanced/model_merging/model_specific"
+    DESCRIPTION = "Scale specific layers of Krea2 series models. Assumes transformer_blocks 0-27, text_fusion.layerwise_blocks 0-1, text_fusion.refiner_blocks 0-1."
+ 
+    def scale(self, model, **kwargs):
+        # モデルの複製
+        m = model.clone()
+ 
+        # スケーリング比率の辞書（'model'キー以外を抽出）
+        ratios = {k: v for k, v in kwargs.items() if k != "model"}
+ 
+        # モデルのパッチ可能なキー（重み）を取得
+        kp = m.get_key_patches("diffusion_model.")
+ 
+        # 全ての重みキーに対してスケーリングを適用
+        for k in kp:
+            scale_value = 1.0
+            # diffusion_model. を除いた純粋なレイヤー名
+            k_unet = k[len("diffusion_model."):]
+ 
+            # 最も長く一致するプレフィックスを探すロジック
+            matched_arg_len = 0
+            for arg_name, arg_value in ratios.items():
+                if k_unet.startswith(arg_name):
+                    if len(arg_name) > matched_arg_len:
+                        scale_value = arg_value
+                        matched_arg_len = len(arg_name)
+ 
+            # スケーリングの適用
+            # scale_value != 1.0 の場合のみパッチを適用
+            if scale_value != 1.0:
+                # kp[k] はすでに適切なパッチ形式
+                # add_patches(patches_dict, strength_patch, strength_model)
+                # 出力 = weight * strength_model + patch * strength_patch
+                # スケーリングを実現: weight * scale_value
+                # = weight * 1.0 + weight * (scale_value - 1.0)
+                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
+ 
+        return (m,)
+
     
 class ModelScaleFlux2Klein:
     """
@@ -1644,6 +1729,7 @@ NODE_CLASS_MAPPINGS = {
     "ModelScaleQwenImage": ModelScaleQwenImage,
     "ModelMergeZImage": ModelMergeZImage,
     "ModelScaleZImage": ModelScaleZImage,
+    "ModelScaleKrea2": ModelScaleKrea2,
     "ModelScaleFlux2Klein": ModelScaleFlux2Klein,
     "ModelScaleErnieImage": ModelScaleErnieImage,
     "ModelScaleHiDreamO1Image": ModelScaleHiDreamO1Image,
@@ -1668,6 +1754,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ModelScaleQwenImage": "Model Scale Qwen Image",
     "ModelMergeZImage": "Model Merge Z-Image",
     "ModelScaleZImage": "Model Scale Z-Image",
+    "ModelScaleKrea2": "Model Scale (Krea2)",
     "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
     "ModelScaleErnieImage": "Model Scale ERNIE Image",
     "ModelScaleHiDreamO1Image": "Model Scale (HiDream-O1-Image)",
