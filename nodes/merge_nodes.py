@@ -387,53 +387,83 @@ class ModelScaleZImage:
 
 class ModelScaleKrea2:
     """
-    Krea2系モデルの特定の層をスケーリングするノード。
+    Krea2 (Krea-2-Turbo) Modelの特定の層をスケーリングするノード。
     scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
  
-    対応レイヤー:
-      - img_in / time_embed / time_mod_proj / txt_in / final_layer (基本コンポーネント)
-      - text_fusion.projector
-      - text_fusion.layerwise_blocks 0-1
-      - text_fusion.refiner_blocks 0-1
-      - transformer_blocks 0-27 (メインDiTブロック)
+    注意: ここでのプレフィックスは safetensors 上のキー名ではなく、
+    ComfyUI がモデルをロードした後の内部モジュール名(nn.Module属性名)に
+    合わせています。UNETLoader経由でロードすると以下のようにリネームされます:
+ 
+      safetensors上のキー                  -> ComfyUI内部キー (diffusion_model.以下)
+      img_in.*                              -> first.*
+      txt_in.*                              -> txtmlp.*
+      time_embed.*                          -> tmlp.*
+      time_mod_proj.*                       -> tproj.*
+      text_fusion.refiner_blocks.{0,1}.*    -> txtfusion.refiner_blocks.{0,1}.*
+      text_fusion.layerwise_blocks.{0,1}.*  -> txtfusion.layerwise_blocks.{0,1}.*
+      text_fusion.projector.*               -> txtfusion.projector.*
+      transformer_blocks.{0..27}.*          -> blocks.{0..27}.*
+      final_layer.*                         -> last.*
     """
+ 
+    NUM_BLOCKS = 28
+    NUM_REFINER_BLOCKS = 2
+    NUM_LAYERWISE_BLOCKS = 2
  
     @classmethod
     def INPUT_TYPES(s):
         arg_dict = {"model": ("MODEL",)}
+ 
         # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
  
-        # 基本コンポーネント
-        arg_dict["img_in."] = argument
-        arg_dict["time_embed."] = argument
-        arg_dict["time_mod_proj."] = argument
-        arg_dict["txt_in."] = argument
-        arg_dict["final_layer."] = argument
+        # Image Embedder (旧 img_in)
+        arg_dict["first."] = argument
  
-        # text_fusion 内の各コンポーネント
-        arg_dict["text_fusion.projector."] = argument
+        # Text Embedder / メインDiT側 (旧 txt_in)
+        arg_dict["txtmlp."] = argument
  
-        # text_fusion.layerwise_blocks (0-1)
-        for i in range(2):
-            arg_dict["text_fusion.layerwise_blocks.{}.".format(i)] = argument
+        # Time Embedder (旧 time_embed)
+        arg_dict["tmlp."] = argument
  
-        # text_fusion.refiner_blocks (0-1)
-        for i in range(2):
-            arg_dict["text_fusion.refiner_blocks.{}.".format(i)] = argument
+        # Time Modulation Projection (旧 time_mod_proj)
+        arg_dict["tproj."] = argument
  
-        # transformer_blocks (0-27)
-        for i in range(28):
-            arg_dict["transformer_blocks.{}.".format(i)] = argument
+        # Text Fusion: Context Refiner (2層)
+        for i in range(s.NUM_REFINER_BLOCKS):
+            arg_dict["txtfusion.refiner_blocks.{}.".format(i)] = argument
+ 
+        # Text Fusion: Layerwise Blocks (2層)
+        for i in range(s.NUM_LAYERWISE_BLOCKS):
+            arg_dict["txtfusion.layerwise_blocks.{}.".format(i)] = argument
+ 
+        # Text Fusion: Projector
+        arg_dict["txtfusion.projector."] = argument
+ 
+        # Main Transformer Blocks (28層: 0-27)
+        for i in range(s.NUM_BLOCKS):
+            arg_dict["blocks.{}.".format(i)] = argument
+ 
+        # Final Layer (旧 final_layer)
+        arg_dict["last."] = argument
  
         return {"required": arg_dict}
  
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "scale"
     CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = "Scale specific layers of Krea2 series models. Assumes transformer_blocks 0-27, text_fusion.layerwise_blocks 0-1, text_fusion.refiner_blocks 0-1."
  
     def scale(self, model, **kwargs):
+        """
+        モデルの各層をスケーリングする
+ 
+        Args:
+            model: 入力モデル
+            **kwargs: 各層のスケール値
+ 
+        Returns:
+            tuple: スケーリング済みモデル
+        """
         # モデルの複製
         m = model.clone()
  
@@ -441,15 +471,18 @@ class ModelScaleKrea2:
         ratios = {k: v for k, v in kwargs.items() if k != "model"}
  
         # モデルのパッチ可能なキー（重み）を取得
+        # diffusion_model 以下のパラメータを対象とする
         kp = m.get_key_patches("diffusion_model.")
  
         # 全ての重みキーに対してスケーリングを適用
         for k in kp:
             scale_value = 1.0
+ 
             # diffusion_model. を除いた純粋なレイヤー名
             k_unet = k[len("diffusion_model."):]
  
             # 最も長く一致するプレフィックスを探すロジック
+            # （ModelMergeBlocks参照）
             matched_arg_len = 0
             for arg_name, arg_value in ratios.items():
                 if k_unet.startswith(arg_name):
@@ -458,16 +491,53 @@ class ModelScaleKrea2:
                         matched_arg_len = len(arg_name)
  
             # スケーリングの適用
-            # scale_value != 1.0 の場合のみパッチを適用
+            # ComfyUIのadd_patchesは (patch, strength_patch, strength_model) を計算する
+            # Output = W * strength_model + P * strength_patch
+            # スケーリングを行うため: W_new = W * scale_value としたい
+            # ここでは strength_model = scale_value - 1.0, strength_patch = 1.0 として実装
             if scale_value != 1.0:
-                # kp[k] はすでに適切なパッチ形式
-                # add_patches(patches_dict, strength_patch, strength_model)
-                # 出力 = weight * strength_model + patch * strength_patch
-                # スケーリングを実現: weight * scale_value
-                # = weight * 1.0 + weight * (scale_value - 1.0)
+                # kp[k] は元の重みパッチ情報
                 m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
  
         return (m,)
+
+
+class DebugModelKeys:
+    """
+    UNETLoaderでロードされたモデルの内部キー名を確認するためのデバッグノード。
+    get_key_patches() で取得できる実際のキー名をコンソールに出力し、
+    STRING としても返すので PreviewAny 等で確認できます。
+ 
+    使い方:
+      UNETLoader -> DebugModelKeys -> (STRING出力を PreviewAny などで確認)
+      同時に model はそのまま素通しするので、ワークフローの途中に挟んでも
+      後続のノードへ影響しません。
+    """
+ 
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"model": ("MODEL",)}}
+ 
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("model", "keys_report")
+    FUNCTION = "debug"
+    CATEGORY = "advanced/debug"
+ 
+    def debug(self, model):
+        kp = model.get_key_patches("diffusion_model.")
+        keys = sorted(kp.keys())
+ 
+        # コンソールにも出力
+        print("=" * 80)
+        print("[DebugModelKeys] total keys under 'diffusion_model.':", len(keys))
+        for k in keys[:80]:
+            print(" ", k)
+        if len(keys) > 80:
+            print(f"  ... and {len(keys) - 80} more")
+        print("=" * 80)
+ 
+        report = "total keys: {}\n".format(len(keys)) + "\n".join(keys)
+        return (model, report)
 
     
 class ModelScaleFlux2Klein:
@@ -1730,6 +1800,7 @@ NODE_CLASS_MAPPINGS = {
     "ModelMergeZImage": ModelMergeZImage,
     "ModelScaleZImage": ModelScaleZImage,
     "ModelScaleKrea2": ModelScaleKrea2,
+    "DebugModelKeys": DebugModelKeys,
     "ModelScaleFlux2Klein": ModelScaleFlux2Klein,
     "ModelScaleErnieImage": ModelScaleErnieImage,
     "ModelScaleHiDreamO1Image": ModelScaleHiDreamO1Image,
@@ -1754,7 +1825,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ModelScaleQwenImage": "Model Scale Qwen Image",
     "ModelMergeZImage": "Model Merge Z-Image",
     "ModelScaleZImage": "Model Scale Z-Image",
-    "ModelScaleKrea2": "Model Scale (Krea2)",
+    "ModelScaleKrea2": "Model Scale Krea2",
+    "DebugModelKeys": "Debug Model Keys",
     "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
     "ModelScaleErnieImage": "Model Scale ERNIE Image",
     "ModelScaleHiDreamO1Image": "Model Scale (HiDream-O1-Image)",
