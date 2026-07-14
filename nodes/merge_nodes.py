@@ -10,6 +10,148 @@ import logging
 from comfy.cli_args import args
 
 
+
+class KeyNameInspector:
+    """
+    MODEL / CLIP / VAE いずれの入力に対しても、
+    内部の重みキー（レイヤー名）を一覧表示するデバッグノード。
+ 
+    UNETLoader / CLIPLoader / DualCLIPLoader / VAELoader など、
+    どのローダーの出力を挟んでも、そのまま後続ノードへ素通しできます。
+ 
+    使い方:
+      UNETLoader  -> KeyNameInspector -> (model はそのまま後続へ)
+      CLIPLoader  -> KeyNameInspector -> (clip はそのまま後続へ)
+      VAELoader   -> KeyNameInspector -> (vae はそのまま後続へ)
+ 
+      STRING 出力（keys_report）を PreviewAny や表示用ノードに繋ぐと
+      キー一覧をコンソール／画面の両方で確認できます。
+ 
+    3つの入力（model / clip / vae）はすべて任意（optional）です。
+    接続された入力のみを検査し、未接続の入力はそのまま None で出力されます。
+    複数同時に接続した場合は、それぞれのキー一覧を続けてレポートします。
+    """
+ 
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {},
+            "optional": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "vae": ("VAE",),
+            },
+        }
+ 
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "STRING")
+    RETURN_NAMES = ("model", "clip", "vae", "keys_report")
+    FUNCTION = "inspect"
+    CATEGORY = "advanced/debug"
+    DESCRIPTION = (
+        "Inspect internal weight key names for MODEL, CLIP, and/or VAE inputs. "
+        "Passes all inputs through unchanged; outputs a combined STRING report "
+        "and also prints it to the console."
+    )
+ 
+    # ------------------------------------------------------------------
+    # 各種入力からキー一覧を取り出すヘルパー
+    # ------------------------------------------------------------------
+ 
+    @staticmethod
+    def _keys_from_model(model):
+        """MODEL (ModelPatcher) から diffusion_model 以下のキーを取得する"""
+        try:
+            kp = model.get_key_patches("diffusion_model.")
+            return sorted(kp.keys())
+        except Exception as e:
+            LOGGER.warning("KeyNameInspector: failed to read MODEL keys: %s", e)
+            return []
+ 
+    @staticmethod
+    def _keys_from_clip(clip):
+        """CLIP から state dict の全キーを取得する"""
+        try:
+            sd = clip.get_sd()
+            return sorted(sd.keys())
+        except Exception as e:
+            LOGGER.warning("KeyNameInspector: failed to read CLIP keys: %s", e)
+            return []
+ 
+    @staticmethod
+    def _keys_from_vae(vae):
+        """VAE から state dict の全キーを取得する"""
+        # ComfyUIのVAEオブジェクトは get_sd() を持つ場合と
+        # 内部の first_stage_model.state_dict() しか持たない場合があるため
+        # 両方に対応する
+        try:
+            if hasattr(vae, "get_sd"):
+                sd = vae.get_sd()
+                return sorted(sd.keys())
+        except Exception as e:
+            LOGGER.warning("KeyNameInspector: VAE.get_sd() failed: %s", e)
+ 
+        try:
+            if hasattr(vae, "first_stage_model"):
+                sd = vae.first_stage_model.state_dict()
+                return sorted(sd.keys())
+        except Exception as e:
+            LOGGER.warning(
+                "KeyNameInspector: VAE.first_stage_model.state_dict() failed: %s",
+                e,
+            )
+ 
+        return []
+ 
+    # ------------------------------------------------------------------
+    # レポート整形
+    # ------------------------------------------------------------------
+ 
+    @staticmethod
+    def _format_section(title, keys, max_console_lines=80):
+        """コンソール出力とレポート文字列の両方に使うセクションを組み立てる"""
+        print("=" * 80)
+        print(f"[KeyNameInspector] {title}: total keys = {len(keys)}")
+        for k in keys[:max_console_lines]:
+            print(" ", k)
+        if len(keys) > max_console_lines:
+            print(f"  ... and {len(keys) - max_console_lines} more")
+        print("=" * 80)
+ 
+        lines = [f"### {title} (total keys: {len(keys)}) ###"]
+        lines.extend(keys)
+        return "\n".join(lines)
+ 
+    # ------------------------------------------------------------------
+    # メイン処理
+    # ------------------------------------------------------------------
+ 
+    def inspect(self, model=None, clip=None, vae=None):
+        sections = []
+ 
+        if model is not None:
+            keys = self._keys_from_model(model)
+            sections.append(self._format_section("MODEL keys (diffusion_model.)", keys))
+ 
+        if clip is not None:
+            keys = self._keys_from_clip(clip)
+            sections.append(self._format_section("CLIP keys", keys))
+ 
+        if vae is not None:
+            keys = self._keys_from_vae(vae)
+            sections.append(self._format_section("VAE keys", keys))
+ 
+        if not sections:
+            report = (
+                "KeyNameInspector: no input connected "
+                "(model / clip / vae はすべて未接続です)"
+            )
+            print(report)
+        else:
+            report = "\n\n".join(sections)
+ 
+        return (model, clip, vae, report)
+
+
 class ModelScaleSDXL(comfy_extras.nodes_model_merging.ModelMergeBlocks):
     """
     SDXL モデルの特定の層をスケーリングするノード。
@@ -500,44 +642,6 @@ class ModelScaleKrea2:
                 m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
  
         return (m,)
-
-
-class DebugModelKeys:
-    """
-    UNETLoaderでロードされたモデルの内部キー名を確認するためのデバッグノード。
-    get_key_patches() で取得できる実際のキー名をコンソールに出力し、
-    STRING としても返すので PreviewAny 等で確認できます。
- 
-    使い方:
-      UNETLoader -> DebugModelKeys -> (STRING出力を PreviewAny などで確認)
-      同時に model はそのまま素通しするので、ワークフローの途中に挟んでも
-      後続のノードへ影響しません。
-    """
- 
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {"model": ("MODEL",)}}
- 
-    RETURN_TYPES = ("MODEL", "STRING")
-    RETURN_NAMES = ("model", "keys_report")
-    FUNCTION = "debug"
-    CATEGORY = "advanced/debug"
- 
-    def debug(self, model):
-        kp = model.get_key_patches("diffusion_model.")
-        keys = sorted(kp.keys())
- 
-        # コンソールにも出力
-        print("=" * 80)
-        print("[DebugModelKeys] total keys under 'diffusion_model.':", len(keys))
-        for k in keys[:80]:
-            print(" ", k)
-        if len(keys) > 80:
-            print(f"  ... and {len(keys) - 80} more")
-        print("=" * 80)
- 
-        report = "total keys: {}\n".format(len(keys)) + "\n".join(keys)
-        return (model, report)
 
     
 class ModelScaleFlux2Klein:
@@ -1793,6 +1897,7 @@ class CLIPSaveQwen:
 # ---- ノード登録用マッピング ----
 
 NODE_CLASS_MAPPINGS = {
+    "KeyNameInspector": KeyNameInspector,
     "ModelScaleSDXL": ModelScaleSDXL,
     "ModelMergeHiDream": ModelMergeHiDream,
     "ModelScaleHiDream": ModelScaleHiDream,
@@ -1800,7 +1905,6 @@ NODE_CLASS_MAPPINGS = {
     "ModelMergeZImage": ModelMergeZImage,
     "ModelScaleZImage": ModelScaleZImage,
     "ModelScaleKrea2": ModelScaleKrea2,
-    "DebugModelKeys": DebugModelKeys,
     "ModelScaleFlux2Klein": ModelScaleFlux2Klein,
     "ModelScaleErnieImage": ModelScaleErnieImage,
     "ModelScaleHiDreamO1Image": ModelScaleHiDreamO1Image,
@@ -1819,6 +1923,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "KeyNameInspector": "Key Name Inspector",
     "ModelScaleSDXL": "Model Scale SDXL",
     "ModelMergeHiDream": "Model Merge HiDream",
     "ModelScaleHiDream": "Model Scale HiDream",
@@ -1826,10 +1931,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ModelMergeZImage": "Model Merge Z-Image",
     "ModelScaleZImage": "Model Scale Z-Image",
     "ModelScaleKrea2": "Model Scale Krea2",
-    "DebugModelKeys": "Debug Model Keys",
     "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
     "ModelScaleErnieImage": "Model Scale ERNIE Image",
-    "ModelScaleHiDreamO1Image": "Model Scale (HiDream-O1-Image)",
+    "ModelScaleHiDreamO1Image": "Model Scale HiDream-O1-Image",
     "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
     "CLIPScaleQwenBlock": "CLIP Scale Qwen Block",
     "CLIPSaveQwen": "CLIP Save Qwen",

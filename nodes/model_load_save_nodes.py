@@ -1,3 +1,126 @@
+import re
+import os
+import torch
+import comfy.sd
+import folder_paths
+
+from safetensors.torch import load_file, save_file
+
+
+def clean_ckpt_name(ckpt_name):
+    """ckpt_name(ファイル名)から拡張子・精度/形式系のキーワードを除去し、
+    末尾に残った '-' や '_' も取り除いた文字列を返す。"""
+
+    name = ckpt_name
+
+    # 拡張子の除去（.safetensors, .pt, .pth）
+    name = re.sub(r'\.(safetensors|pt|pth)', '', name, flags=re.IGNORECASE)
+
+    # 精度・形式系キーワードの除去
+    keywords = [
+        "fp32", "fp16", "bf16", "fp8",
+        "svd", "scaled", "mxfp8", "nvfp4",
+        "int8", "convrot", "hq",
+        "e4m3fn", "e4m3", "e5m2fn", "e5m2",
+    ]
+    pattern = r'(?:' + '|'.join(keywords) + r')'
+    name = re.sub(pattern, '', name, flags=re.IGNORECASE)
+
+    # 文末に残った '-' や '_' の除去（複数連続もまとめて除去）
+    name = re.sub(r'[-_]+$', '', name)
+
+    return name
+
+
+def get_combined_model_list():
+    """checkpoints と diffusion_models 両方のフォルダからファイル名一覧を取得し、
+    重複を除いてソートしたリストを返す。"""
+    ckpt_list = folder_paths.get_filename_list("checkpoints")
+    unet_list = folder_paths.get_filename_list("diffusion_models")
+    combined = sorted(set(ckpt_list) | set(unet_list))
+    return combined
+
+
+def get_model_full_path(model_name):
+    """model_name が checkpoints / diffusion_models のどちらのフォルダに
+    存在するかを調べ、(folder_type, full_path) を返す。"""
+    ckpt_list = folder_paths.get_filename_list("checkpoints")
+    if model_name in ckpt_list:
+        return "checkpoints", folder_paths.get_full_path_or_raise("checkpoints", model_name)
+
+    unet_list = folder_paths.get_filename_list("diffusion_models")
+    if model_name in unet_list:
+        return "diffusion_models", folder_paths.get_full_path_or_raise("diffusion_models", model_name)
+
+    raise FileNotFoundError(f"Model '{model_name}' not found in 'checkpoints' or 'diffusion_models' folders.")
+
+
+class LoadCheckpointWithName:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model_name": (get_combined_model_list(), {"tooltip": "The name of the checkpoint (model) to load. Searches both 'checkpoints' and 'diffusion_models' folders."}),
+            }
+        }
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "STRING")
+    RETURN_NAMES = ("MODEL", "CLIP", "VAE", "model_name")
+    OUTPUT_TOOLTIPS = (
+        "The model used for denoising latents.",
+        "The CLIP model used for encoding text prompts.",
+        "The VAE model used for encoding and decoding images to and from latent space.",
+        "Cleaned model name (extension and precision/format keywords removed).",
+    )
+    FUNCTION = "load_checkpoint"
+
+    CATEGORY = "model/loaders"
+    DESCRIPTION = "Loads a diffusion model checkpoint (from 'checkpoints' or 'diffusion_models' folders) and also outputs a cleaned name string."
+    SEARCH_ALIASES = ["load model", "checkpoint", "model loader", "load checkpoint", "ckpt", "model"]
+
+    def load_checkpoint(self, model_name):
+        folder_type, ckpt_path = get_model_full_path(model_name)
+        out = comfy.sd.load_checkpoint_guess_config(
+            ckpt_path,
+            output_vae=True,
+            output_clip=True,
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        )
+        cleaned_name = clean_ckpt_name(model_name)
+        return out[:3] + (cleaned_name,)
+
+
+class LoadDiffusionModelWithName:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model_name": (get_combined_model_list(), {"tooltip": "The name of the diffusion model (UNET) to load. Searches both 'checkpoints' and 'diffusion_models' folders."}),
+                "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"], {"advanced": True})
+            }
+        }
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("MODEL", "model_name")
+    FUNCTION = "load_unet"
+
+    CATEGORY = "model/loaders"
+    DESCRIPTION = "Loads a diffusion model (UNET) from 'checkpoints' or 'diffusion_models' folders and also outputs a cleaned name string."
+
+    def load_unet(self, model_name, weight_dtype):
+        model_options = {}
+        if weight_dtype == "fp8_e4m3fn":
+            model_options["dtype"] = torch.float8_e4m3fn
+        elif weight_dtype == "fp8_e4m3fn_fast":
+            model_options["dtype"] = torch.float8_e4m3fn
+            model_options["fp8_optimizations"] = True
+        elif weight_dtype == "fp8_e5m2":
+            model_options["dtype"] = torch.float8_e5m2
+
+        folder_type, unet_path = get_model_full_path(model_name)
+        model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+        cleaned_name = clean_ckpt_name(model_name)
+        return (model, cleaned_name)
+
+
 """
 Load Original Model / Model Save with Original
 ===============================================
@@ -26,12 +149,6 @@ Nodes:
   LoadOriginalModel     — safetensors を生読みして original_model と model を出力
   ModelSaveWithOriginal — 調整済み model と original_model を合成して保存
 """
-
-import os
-import torch
-import folder_paths
-
-from safetensors.torch import load_file, save_file
 
 # ------------------------------------------------------------------------------
 # Type alias
@@ -348,11 +465,15 @@ class ModelSaveWithOriginal:
 # ------------------------------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
+    "LoadCheckpointWithName": LoadCheckpointWithName,
+    "LoadDiffusionModelWithName": LoadDiffusionModelWithName,
     "LoadOriginalModel": LoadOriginalModel,
     "ModelSaveWithOriginal": ModelSaveWithOriginal,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "LoadCheckpointWithName": "Load Checkpoint (with Name)",
+    "LoadDiffusionModelWithName": "Load Diffusion Model (with Name)",
     "LoadOriginalModel": "Load Original Model",
     "ModelSaveWithOriginal": "Model Save with Original",
 }
