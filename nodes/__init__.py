@@ -3,7 +3,7 @@ nodes パッケージ
 各カテゴリのノードを個別ファイルで管理し、NODE_CLASS_MAPPINGS / NODE_DISPLAY_NAME_MAPPINGS を統合してエクスポートする。
 
   color_nodes.py                  : 色調節ノード
-  save_nodes.py                   : セーブ用ノード
+  save_image_nodes.py             : 画像セーブ用ノード
   merge_nodes.py                  : マージ用ノード
   text_encode_nodes.py            : テキストエンコードノード
   image_difference_checker_nodes.py: 画像差分チェッカーノード
@@ -14,7 +14,7 @@ from .color_nodes import (
     NODE_CLASS_MAPPINGS as COLOR_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as COLOR_DISPLAY_MAPPINGS,
 )
-from .save_nodes import (
+from .save_image_nodes import (
     NODE_CLASS_MAPPINGS as SAVE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as SAVE_DISPLAY_MAPPINGS,
 )
