@@ -23,7 +23,7 @@ class SaveImageWithPrompt:
                 "images": ("IMAGE",),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
                 "positive_prompt": ("STRING", {"default": ""}),
-                "positive_prompt_2": ("STRING", {"default": ""}),
+                "additional_prompt": ("STRING", {"default": ""}),
                 "negative_prompt": ("STRING", {"default": ""}),
                 "caption": ("STRING", {"default": ""}),
                 "numbers": (
@@ -49,7 +49,7 @@ class SaveImageWithPrompt:
         images,
         filename_prefix="ComfyUI",
         positive_prompt="",
-        positive_prompt_2="",
+        additional_prompt="",
         negative_prompt="",
         caption="",
         numbers=True,
@@ -79,8 +79,8 @@ class SaveImageWithPrompt:
                     metadata.add_text("prompt", json.dumps(prompt))
                 if positive_prompt:
                     metadata.add_text("positive_prompt", json.dumps(positive_prompt))
-                if positive_prompt_2:
-                    metadata.add_text("positive_prompt_2", json.dumps(positive_prompt_2))
+                if additional_prompt:
+                    metadata.add_text("additional_prompt", json.dumps(additional_prompt))
                 if negative_prompt:
                     metadata.add_text("negative_prompt", json.dumps(negative_prompt))
                 if caption:
