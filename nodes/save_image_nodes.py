@@ -23,6 +23,7 @@ class SaveImageWithPrompt:
                 "images": ("IMAGE",),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
                 "positive_prompt": ("STRING", {"default": ""}),
+                "positive_prompt_2": ("STRING", {"default": ""}),
                 "negative_prompt": ("STRING", {"default": ""}),
                 "caption": ("STRING", {"default": ""}),
                 "numbers": (
@@ -41,13 +42,14 @@ class SaveImageWithPrompt:
     FUNCTION = "save_images"
     OUTPUT_NODE = True
     CATEGORY = "image"
-    DESCRIPTION = "Saves images to your ComfyUI output directory with positive and negative prompts and caption in metadata."
+    DESCRIPTION = "Saves images to your ComfyUI output directory with positive (x2) and negative prompts and caption in metadata."
 
     def save_images(
         self,
         images,
         filename_prefix="ComfyUI",
         positive_prompt="",
+        positive_prompt_2="",
         negative_prompt="",
         caption="",
         numbers=True,
@@ -77,6 +79,8 @@ class SaveImageWithPrompt:
                     metadata.add_text("prompt", json.dumps(prompt))
                 if positive_prompt:
                     metadata.add_text("positive_prompt", json.dumps(positive_prompt))
+                if positive_prompt_2:
+                    metadata.add_text("positive_prompt_2", json.dumps(positive_prompt_2))
                 if negative_prompt:
                     metadata.add_text("negative_prompt", json.dumps(negative_prompt))
                 if caption:
