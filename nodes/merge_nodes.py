@@ -1665,85 +1665,95 @@ class VAEScaleFlux2Block:
 
 class VAEScaleQwenBlock:
     """
-    Qwen Image VAEの特定の層をスケーリングするノード
+    Qwen-Image VAEの特定の層をスケーリングするノード
     scale=1.0 でそのまま、scale=0.0 で完全に抑制
+ 
+    対象キー構造（本ノードで参照する get_sd() のキー例）:
+      conv1.*
+      conv2.*
+      encoder.conv1.*
+      encoder.downsamples.N.*      (N=0..10)
+      encoder.middle.0.*           (residual block)
+      encoder.middle.1.*           (attention block)
+      encoder.middle.2.*           (residual block)
+      encoder.head.*
+      decoder.conv1.*
+      decoder.upsamples.N.*        (N=0..14)
+      decoder.middle.0.*           (residual block)
+      decoder.middle.1.*           (attention block)
+      decoder.middle.2.*           (residual block)
+      decoder.head.*
+ 
+    downsamples / upsamples の内訳（キー一覧より判定）:
+      encoder.downsamples: 0,1,3,4,6,7,9,10 = residual block
+                            2,5,8           = resample (5,8 は time_conv も持つ)
+      decoder.upsamples:   0,1,2,4,5,6,8,9,10,12,13,14 = residual block
+                            3,7,11                       = resample (3,7 は time_conv も持つ)
     """
-
+ 
+    LAYER_KEYS = [
+        # Top-level conv (post-quant / pre-quant 相当)
+        "conv1",
+        "conv2",
+        # Encoder
+        "encoder.conv1",
+        *[f"encoder.downsamples.{i}." for i in range(11)],
+        "encoder.middle.0.",  # residual
+        "encoder.middle.1.",  # attention
+        "encoder.middle.2.",  # residual
+        "encoder.head.",
+        # Decoder
+        "decoder.conv1",
+        "decoder.middle.0.",  # residual
+        "decoder.middle.1.",  # attention
+        "decoder.middle.2.",  # residual
+        *[f"decoder.upsamples.{i}." for i in range(15)],
+        "decoder.head.",
+    ]
+ 
     @classmethod
     def INPUT_TYPES(s):
-        arg_dict = {
-            "vae": ("VAE",),
-        }
-
+        arg_dict = {"vae": ("VAE",)}
         argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
-        # --- Global conv layers ---
-        arg_dict["conv1"] = argument
-        arg_dict["conv2"] = argument
-
-        # --- Encoder ---
-        arg_dict["encoder.conv1"] = argument
-        # Encoder downsamples (0-10)
-        for i in range(11):
-            arg_dict[f"encoder.downsamples.{i}."] = argument
-        # Encoder middle (0-2)
-        for i in range(3):
-            arg_dict[f"encoder.middle.{i}."] = argument
-        arg_dict["encoder.head"] = argument
-
-        # --- Decoder ---
-        arg_dict["decoder.conv1"] = argument
-        # Decoder middle (0-2)
-        for i in range(3):
-            arg_dict[f"decoder.middle.{i}."] = argument
-        # Decoder upsamples (0-14)
-        for i in range(15):
-            arg_dict[f"decoder.upsamples.{i}."] = argument
-        arg_dict["decoder.head"] = argument
-
+        for key in s.LAYER_KEYS:
+            arg_dict[key] = argument
         return {"required": arg_dict}
-
+ 
     RETURN_TYPES = ("VAE",)
     FUNCTION = "scale"
     CATEGORY = "advanced/model_merging/model_specific"
-
-    DESCRIPTION = "Scale specific layers of Qwen Image VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
-
+    DESCRIPTION = (
+        "Scale specific layers of the Qwen-Image VAE. "
+        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
+    )
+ 
     def scale(self, vae, **kwargs):
-        import torch
-        import copy
-
-        # VAEをクローン
-        # ComfyUIのVAEオブジェクトは直接cloneメソッドを持たない場合があるので
-        # 内部のstate_dictを操作する
-
-        ratios = {k: v for k, v in kwargs.items() if k != "vae"}
-
-        # VAEの内部モデルにアクセス
-        # ComfyUIのVAEラッパーを通じてstate_dictを取得・設定
-        device = vae.device
+        # ComfyUI が widget 名の "." を "_" に変換する場合があるため、
+        # kwargs のキーを LAYER_KEYS に復元する
+        kwarg_to_layer = {
+            layer_key.replace(".", "_"): layer_key
+            for layer_key in self.LAYER_KEYS
+        }
+        ratios = {}
+        for k, v in kwargs.items():
+            if k in kwarg_to_layer:
+                ratios[kwarg_to_layer[k]] = v
+            elif k in self.LAYER_KEYS:
+                ratios[k] = v
+ 
+        # テンソルのスケーリング（最長一致したプレフィックスの scale を採用）
         sd = vae.get_sd()
-
         new_sd = {}
-
-        for k, v in sd.items():
+        for tensor_key, tensor_val in sd.items():
             scale = 1.0
-            matched_arg_len = 0
-
+            matched_len = 0
             for arg_name, arg_value in ratios.items():
-                if k.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale = arg_value
-                        matched_arg_len = len(arg_name)
-
-            if scale != 1.0:
-                new_sd[k] = v * scale
-            else:
-                new_sd[k] = v
-
-        # 新しいVAEを作成
+                if tensor_key.startswith(arg_name) and len(arg_name) > matched_len:
+                    scale = arg_value
+                    matched_len = len(arg_name)
+            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
+ 
         new_vae = comfy.sd.VAE(sd=new_sd)
-
         return (new_vae,)
 
 
