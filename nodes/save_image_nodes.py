@@ -26,6 +26,7 @@ class SaveImageWithPrompt:
                 "additional_prompt": ("STRING", {"default": ""}),
                 "negative_prompt": ("STRING", {"default": ""}),
                 "caption": ("STRING", {"default": ""}),
+                "seed": ("STRING", {"default": ""}),  # 追加: string形式のseed入力
                 "numbers": (
                     "BOOLEAN",
                     {
@@ -42,7 +43,7 @@ class SaveImageWithPrompt:
     FUNCTION = "save_images"
     OUTPUT_NODE = True
     CATEGORY = "image"
-    DESCRIPTION = "Saves images to your ComfyUI output directory with positive (x2) and negative prompts and caption in metadata."
+    DESCRIPTION = "Saves images to your ComfyUI output directory with positive (x2) and negative prompts, caption, and seed in metadata."
 
     def save_images(
         self,
@@ -52,6 +53,7 @@ class SaveImageWithPrompt:
         additional_prompt="",
         negative_prompt="",
         caption="",
+        seed="",  # 追加: 関数の引数
         numbers=True,
         prompt=None,
         extra_pnginfo=None,
@@ -85,6 +87,8 @@ class SaveImageWithPrompt:
                     metadata.add_text("negative_prompt", json.dumps(negative_prompt))
                 if caption:
                     metadata.add_text("caption", json.dumps(caption))
+                if seed:  # 追加: メタデータへの保存処理
+                    metadata.add_text("seed", json.dumps(seed))
                 if extra_pnginfo is not None:
                     for x in extra_pnginfo:
                         metadata.add_text(x, json.dumps(extra_pnginfo[x]))
