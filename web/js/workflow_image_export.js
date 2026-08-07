@@ -35,6 +35,126 @@ async function waitForNodeImages() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// DOM widgets (e.g. the multiline "text" widget used by CLIP Text Encode)
+// are backed by a real HTMLTextAreaElement/HTMLInputElement that litegraph
+// positions on top of the canvas with CSS. lgCanvas.draw() only paints the
+// <canvas> 2D context, so it never picks up whatever is inside that
+// overlaid DOM element. When the canvas is temporarily swapped for the
+// virtual (offscreen) one during export, those widgets end up rendered as
+// blank space.
+//
+// To fix this we temporarily force every DOM widget on the graph into a
+// manual "draw as text on canvas" mode for the duration of the capture,
+// then restore its normal behavior afterwards.
+// ---------------------------------------------------------------------------
+
+function isDomWidget(widget) {
+  return !!(widget && (widget.element || widget.inputEl || widget.type === "customtext" || widget.type === "textarea"));
+}
+
+function getWidgetText(widget) {
+  if (widget.inputEl && typeof widget.inputEl.value === "string") return widget.inputEl.value;
+  if (widget.element && typeof widget.element.value === "string") return widget.element.value;
+  if (typeof widget.value === "string") return widget.value;
+  if (widget.value != null) return String(widget.value);
+  return "";
+}
+
+function wrapText(ctx, text, maxWidth) {
+  const lines = [];
+  const rawLines = String(text).split(/\r\n|\r|\n/);
+  for (const rawLine of rawLines) {
+    if (rawLine === "") {
+      lines.push("");
+      continue;
+    }
+    let current = "";
+    for (const word of rawLine.split(" ")) {
+      const candidate = current ? current + " " + word : word;
+      if (ctx.measureText(candidate).width > maxWidth && current) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = candidate;
+      }
+    }
+    if (current) lines.push(current);
+  }
+  return lines;
+}
+
+// Draws a DOM-backed widget's current text value directly onto the 2D
+// context, mimicking litegraph's normal widget box styling closely enough
+// to be legible in the exported image.
+function drawDomWidgetFallback(ctx, node, widget, widgetWidth, y, height) {
+  const text = getWidgetText(widget);
+  const margin = 8;
+
+  ctx.save();
+  ctx.beginPath();
+  const radius = 4;
+  if (ctx.roundRect) {
+    ctx.roundRect(margin, y, widgetWidth - margin * 2, height, radius);
+  } else {
+    ctx.rect(margin, y, widgetWidth - margin * 2, height);
+  }
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fill();
+  ctx.strokeStyle = "#4a4a4a";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.clip();
+  ctx.fillStyle = text ? "#dddddd" : "#777777";
+  ctx.font = "12px Arial";
+  ctx.textBaseline = "top";
+  ctx.textAlign = "left";
+
+  const padX = 6;
+  const padY = 6;
+  const lineHeight = 14;
+  const maxWidth = widgetWidth - margin * 2 - padX * 2;
+  const lines = wrapText(ctx, text || "", maxWidth);
+  const maxLines = Math.max(1, Math.floor((height - padY * 2) / lineHeight));
+
+  for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
+    ctx.fillText(lines[i], margin + padX, y + padY + i * lineHeight);
+  }
+
+  ctx.restore();
+}
+
+// Monkeypatches every DOM widget currently in the graph so that, instead of
+// relying on its real (offscreen, un-swapped) DOM element, it paints its
+// text value onto whatever canvas context it's given. Returns a restore
+// function that undoes the patch.
+function forceDomWidgetsToCanvasDraw() {
+  const patched = [];
+
+  for (const node of app.graph._nodes) {
+    if (!node.widgets) continue;
+    for (const widget of node.widgets) {
+      if (!isDomWidget(widget)) continue;
+
+      const originalDraw = widget.draw;
+      const originalComputeSize = widget.computeSize ? widget.computeSize.bind(widget) : null;
+
+      widget.draw = function (ctx, node, widgetWidth, y, height) {
+        drawDomWidgetFallback(ctx, node, widget, widgetWidth, y, height);
+      };
+
+      patched.push({ widget, originalDraw, originalComputeSize });
+    }
+  }
+
+  return function restore() {
+    for (const { widget, originalDraw } of patched) {
+      widget.draw = originalDraw;
+    }
+  };
+}
+
 class PngWorkflowImage {
   extension = "png";
 
@@ -204,7 +324,15 @@ class PngWorkflowImage {
       ctx.restore();
     }
 
-    lgCanvas.draw(true, true);
+    // DOM-backed widgets (multiline text boxes, etc.) live outside the
+    // canvas and won't be captured by draw(). Temporarily force them to
+    // paint their text onto the 2D context instead, for this draw only.
+    const restoreDomWidgets = forceDomWidgetsToCanvasDraw();
+    try {
+      lgCanvas.draw(true, true);
+    } finally {
+      restoreDomWidgets();
+    }
 
     await nextFrame();
     await nextFrame();
