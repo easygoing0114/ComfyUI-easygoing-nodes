@@ -58,10 +58,10 @@ class PngWorkflowImage {
     );
 
     // Margin so links don't get clipped at the edges
-    bounds[0] -= 300;
-    bounds[1] -= 300;
-    bounds[2] += 300;
-    bounds[3] += 300;
+    bounds[0] -= 50;
+    bounds[1] -= 80;
+    bounds[2] += 50;
+    bounds[3] += 20;
 
     return bounds;
   }
