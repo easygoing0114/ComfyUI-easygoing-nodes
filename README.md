@@ -1,5 +1,6 @@
+
 <div align="center">
-<img width="705" height="500" alt="ComfyUI Easygoing Nodes thumbnail" src="Images/thumbnail image.png">
+<img width="800" height="343" alt="ComfyUI Easygoing Nodes banner image" src="Images/easygoing_banner_image.png">
 </div>
 
 # ComfyUI-easygoing-nodes
