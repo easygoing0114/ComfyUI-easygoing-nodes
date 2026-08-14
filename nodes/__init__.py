@@ -1,56 +1,21 @@
-"""
-nodes パッケージ
-各カテゴリのノードを個別ファイルで管理し、NODE_CLASS_MAPPINGS / NODE_DISPLAY_NAME_MAPPINGS を統合してエクスポートする。
+from .color_nodes import NODE_LIST as COLOR_NODE_LIST
+from .image_difference_checker_nodes import NODE_LIST as IMAGE_DIFF_NODE_LIST
+from .merge_nodes import NODE_LIST as MERGE_NODE_LIST
+from .model_load_save_nodes import NODE_LIST as MODEL_LOAD_SAVE_NODE_LIST
+from .save_image_nodes import NODE_LIST as SAVE_IMAGE_NODE_LIST
+from .text_encode_nodes import NODE_LIST as TEXT_ENCODE_NODE_LIST
 
-  color_nodes.py                  : 色調節ノード
-  save_image_nodes.py             : 画像セーブ用ノード
-  merge_nodes.py                  : マージ用ノード
-  text_encode_nodes.py            : テキストエンコードノード
-  image_difference_checker_nodes.py: 画像差分チェッカーノード
-  model_load_save_nodes.py        : モデルのオリジナル構造を保持したロード・セーブノード
-"""
+NODE_LIST = [
+    *COLOR_NODE_LIST,
+    *IMAGE_DIFF_NODE_LIST,
+    *MERGE_NODE_LIST,
+    *MODEL_LOAD_SAVE_NODE_LIST,
+    *SAVE_IMAGE_NODE_LIST,
+    *TEXT_ENCODE_NODE_LIST,
+]
 
-from .color_nodes import (
-    NODE_CLASS_MAPPINGS as COLOR_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as COLOR_DISPLAY_MAPPINGS,
-)
-from .save_image_nodes import (
-    NODE_CLASS_MAPPINGS as SAVE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as SAVE_DISPLAY_MAPPINGS,
-)
-from .merge_nodes import (
-    NODE_CLASS_MAPPINGS as MERGE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as MERGE_DISPLAY_MAPPINGS,
-)
-from .text_encode_nodes import (
-    NODE_CLASS_MAPPINGS as TEXT_ENCODE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as TEXT_ENCODE_DISPLAY_MAPPINGS,
-)
-from .image_difference_checker_nodes import (
-    NODE_CLASS_MAPPINGS as IMAGE_DIFF_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as IMAGE_DIFF_DISPLAY_MAPPINGS,
-)
-from .model_load_save_nodes import (
-    NODE_CLASS_MAPPINGS as LOAD_SAVE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as LOAD_SAVE_DISPLAY_MAPPINGS,
-)
+RENAMED_NODES = [
+    node_cls for node_cls in NODE_LIST if hasattr(node_cls, "NODE_ID_LEGACY")
+]
 
-NODE_CLASS_MAPPINGS = {
-    **COLOR_CLASS_MAPPINGS,
-    **SAVE_CLASS_MAPPINGS,
-    **MERGE_CLASS_MAPPINGS,
-    **TEXT_ENCODE_CLASS_MAPPINGS,
-    **IMAGE_DIFF_CLASS_MAPPINGS,
-    **LOAD_SAVE_CLASS_MAPPINGS,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    **COLOR_DISPLAY_MAPPINGS,
-    **SAVE_DISPLAY_MAPPINGS,
-    **MERGE_DISPLAY_MAPPINGS,
-    **TEXT_ENCODE_DISPLAY_MAPPINGS,
-    **IMAGE_DIFF_DISPLAY_MAPPINGS,
-    **LOAD_SAVE_DISPLAY_MAPPINGS,
-}
-
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["NODE_LIST", "RENAMED_NODES"]

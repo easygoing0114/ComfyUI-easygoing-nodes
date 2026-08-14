@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import logging
-import torch
 
 import comfy.model_management as mm
-from comfy.comfy_types.node_typing import IO, ComfyNodeABC, InputTypeDict
-
+from comfy_api.latest import io
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +38,7 @@ def _offload_vram(clip) -> None:
 
     logger.info(f"CLIPOffload: Offloading CLIP from VRAM ({loaded_mb:.1f} MB loaded)")
 
-    # Call LoadedModel.model_unload() which internally calls patcher.detach(),
+    # LoadedModel.model_unload() internally calls patcher.detach(),
     # moving all GPU weights back to offload_device (CPU).
     lm.model_unload(unpatch_weights=True)
 
@@ -59,7 +57,7 @@ def _offload_ram(clip) -> None:
     Release pinned (page-locked) memory held by the CLIP patcher.
 
     partially_unload_ram() is only implemented in ModelPatcherDynamic;
-    the base ModelPatcher version is a no-op (pass). We therefore call
+    the base ModelPatcher version is a no-op. We therefore call
     unpin_all_weights() directly to achieve equivalent behaviour on both.
     """
     patcher = clip.patcher
@@ -67,7 +65,6 @@ def _offload_ram(clip) -> None:
     # VRAM offload must come first; pinned memory lives on CPU weights.
     _offload_vram(clip)
 
-    # Unpin page-locked memory
     if hasattr(patcher, "unpin_all_weights"):
         pinned_count = len(patcher.pinned)
         if pinned_count > 0:
@@ -85,7 +82,11 @@ def _offload_ram(clip) -> None:
     logger.info("CLIPOffload: CLIP unpinned from RAM")
 
 
-class CLIPTextEncodeWithOffload(ComfyNodeABC):
+# ------------------------------------------------------------------------------
+# Node: CLIP Text Encode (with Offload)
+# ------------------------------------------------------------------------------
+
+class CLIPTextEncodeWithOffload(io.ComfyNode):
     """
     Extends the standard CLIPTextEncode node with VRAM and RAM offload toggles.
 
@@ -101,72 +102,76 @@ class CLIPTextEncodeWithOffload(ComfyNodeABC):
         Note: the next load will be slightly slower without pinned memory.
     """
 
+    NODE_ID_LEGACY = "CLIPTextEncodeWithOffload"
+    # Widget-only inputs, in the order used by the V1 INPUT_TYPES (excludes the
+    # "clip" socket input). Required for positional widget-value migration.
+    NODE_ID_INPUT_ORDER = (
+        "text",
+        "offload_from_vram",
+        "offload_from_ram",
+    )
+
     @classmethod
-    def INPUT_TYPES(cls) -> InputTypeDict:
-        return {
-            "required": {
-                "text": (
-                    IO.STRING,
-                    {
-                        "multiline": True,
-                        "dynamicPrompts": True,
-                        "tooltip": "The text prompt to encode.",
-                    },
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_CLIPTextEncodeWithOffload",
+            display_name="CLIP Text Encode (with Offload)",
+            category="conditioning",
+            description=(
+                "CLIPTextEncode with optional VRAM and RAM offload. "
+                "Releases the CLIP model from VRAM and/or RAM after encoding to save memory. "
+                "ComfyUI's output cache ensures the node does not re-execute on repeated "
+                "generations with the same prompt, keeping performance impact minimal."
+            ),
+            search_aliases=[
+                "text", "prompt", "text prompt", "positive prompt", "negative prompt",
+                "encode text", "text encoder", "encode prompt", "offload", "vram", "ram",
+            ],
+            inputs=[
+                io.String.Input(
+                    "text",
+                    multiline=True,
+                    dynamic_prompts=True,
+                    tooltip="The text prompt to encode.",
                 ),
-                "clip": (
-                    IO.CLIP,
-                    {"tooltip": "The CLIP model used for encoding the text."},
+                io.Clip.Input(
+                    "clip",
+                    tooltip="The CLIP model used for encoding the text.",
                 ),
-                "offload_from_vram": (
-                    IO.BOOLEAN,
-                    {
-                        "default": False,
-                        "tooltip": (
-                            "When True, unloads the CLIP model from VRAM to CPU after encoding. "
-                            "Repeated generations with the same prompt use the cache, "
-                            "so no re-encoding occurs."
-                        ),
-                    },
+                io.Boolean.Input(
+                    "offload_from_vram",
+                    default=True,
+                    tooltip=(
+                        "When True, unloads the CLIP model from VRAM to CPU after encoding. "
+                        "Repeated generations with the same prompt use the cache, "
+                        "so no re-encoding occurs."
+                    ),
                 ),
-                "offload_from_ram": (
-                    IO.BOOLEAN,
-                    {
-                        "default": False,
-                        "tooltip": (
-                            "When True, also releases pinned (page-locked) memory after encoding. "
-                            "offload_from_vram is implied. "
-                            "Reduces RAM usage further but slightly slows the next load."
-                        ),
-                    },
+                io.Boolean.Input(
+                    "offload_from_ram",
+                    default=True,
+                    tooltip=(
+                        "When True, also releases pinned (page-locked) memory after encoding. "
+                        "offload_from_vram is implied. "
+                        "Reduces RAM usage further but slightly slows the next load."
+                    ),
                 ),
-            }
-        }
+            ],
+            outputs=[
+                io.Conditioning.Output(
+                    tooltip="A conditioning containing the embedded text used to guide the diffusion model.",
+                ),
+            ],
+        )
 
-    RETURN_TYPES = (IO.CONDITIONING,)
-    OUTPUT_TOOLTIPS = (
-        "A conditioning containing the embedded text used to guide the diffusion model.",
-    )
-    FUNCTION = "encode"
-
-    CATEGORY = "conditioning"
-    DESCRIPTION = (
-        "CLIPTextEncode with optional VRAM and RAM offload. "
-        "Releases the CLIP model from VRAM and/or RAM after encoding to save memory. "
-        "ComfyUI's output cache ensures the node does not re-execute on repeated "
-        "generations with the same prompt, keeping performance impact minimal."
-    )
-    SEARCH_ALIASES = [
-        "text", "prompt", "text prompt", "positive prompt", "negative prompt",
-        "encode text", "text encoder", "encode prompt", "offload", "vram", "ram",
-    ]
-
-    def encode(
-        self,
+    @classmethod
+    def execute(
+        cls,
         clip,
         text: str,
         offload_from_vram: bool,
         offload_from_ram: bool,
-    ):
+    ) -> io.NodeOutput:
         if clip is None:
             raise RuntimeError(
                 "ERROR: clip input is invalid: None\n\n"
@@ -178,31 +183,21 @@ class CLIPTextEncodeWithOffload(ComfyNodeABC):
         tokens = clip.tokenize(text)
         conditioning = clip.encode_from_tokens_scheduled(tokens)
 
-        # --- Offload logic ---
-        # offload_from_ram implies offload_from_vram
-        effective_vram = offload_from_vram or offload_from_ram
-
+        # --- Offload logic (offload_from_ram implies offload_from_vram) ---
         if offload_from_ram:
             try:
                 _offload_ram(clip)
             except Exception as e:
                 logger.warning(f"CLIPOffload: RAM offload failed (non-fatal): {e}")
-
-        elif effective_vram:
+        elif offload_from_vram:
             try:
                 _offload_vram(clip)
             except Exception as e:
                 logger.warning(f"CLIPOffload: VRAM offload failed (non-fatal): {e}")
 
-        return (conditioning,)
+        return io.NodeOutput(conditioning)
 
 
-# ---- ノード登録用マッピング ----
-
-NODE_CLASS_MAPPINGS = {
-    "CLIPTextEncodeWithOffload": CLIPTextEncodeWithOffload,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "CLIPTextEncodeWithOffload": "CLIP Text Encode (with Offload)",
-}
+NODE_LIST = [
+    CLIPTextEncodeWithOffload,
+]

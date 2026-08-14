@@ -1,114 +1,171 @@
+import json
+import logging
+import os
+
+import torch
+
 import comfy.sd
 import comfy.utils
-import comfy_extras.nodes_model_merging
 import folder_paths
-import json
-import os
-import torch
-import copy
-import logging
 from comfy.cli_args import args
 
+from comfy_api.latest import ComfyExtension, io
+
+LOGGER = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------------------
+# Shared helpers
+# ------------------------------------------------------------------------------
+
+_SCALE_ARG = dict(default=1.0, min=0.0, max=2.0, step=0.01)
+_RATIO_ARG = dict(default=1.0, min=0.0, max=1.0, step=0.01)
 
 
-class KeyNameInspector:
-    """
-    MODEL / CLIP / VAE いずれの入力に対しても、
-    内部の重みキー（レイヤー名）を一覧表示するデバッグノード。
- 
-    UNETLoader / CLIPLoader / DualCLIPLoader / VAELoader など、
-    どのローダーの出力を挟んでも、そのまま後続ノードへ素通しできます。
- 
-    使い方:
-      UNETLoader  -> KeyNameInspector -> (model はそのまま後続へ)
-      CLIPLoader  -> KeyNameInspector -> (clip はそのまま後続へ)
-      VAELoader   -> KeyNameInspector -> (vae はそのまま後続へ)
- 
-      STRING 出力（keys_report）を PreviewAny や表示用ノードに繋ぐと
-      キー一覧をコンソール／画面の両方で確認できます。
- 
-    3つの入力（model / clip / vae）はすべて任意（optional）です。
-    接続された入力のみを検査し、未接続の入力はそのまま None で出力されます。
-    複数同時に接続した場合は、それぞれのキー一覧を続けてレポートします。
-    """
- 
+def longest_prefix_match(key: str, ratios: dict) -> float:
+    """Return the value whose key is the longest prefix of `key`. Default 1.0."""
+    best_value = 1.0
+    best_len = 0
+    for prefix, value in ratios.items():
+        if key.startswith(prefix) and len(prefix) > best_len:
+            best_value = value
+            best_len = len(prefix)
+    return best_value
+
+
+def build_scale_inputs(layer_keys: list[str], node_input: str, node_type=io.Float, **arg) -> list:
+    """Build one widget input per layer key, plus the leading model/clip/vae input."""
+    scale_arg = arg or _SCALE_ARG
+    return [node_type.Input(node_input)] + [
+        io.Float.Input(key, **scale_arg) for key in layer_keys
+    ]
+
+
+def single_output(node_type, display_name: str | None = None) -> list:
+    """One output socket of the given io type (Model / Clip / Vae, ...)."""
+    return [node_type.Output(display_name=display_name)] if display_name else [node_type.Output()]
+
+
+def restore_layer_keys(kwargs: dict, layer_keys: list[str]) -> dict:
+    """ComfyUI may convert '.' to '_' in widget ids; map kwargs back onto layer_keys."""
+    dotted_to_underscore = {key.replace(".", "_"): key for key in layer_keys}
+    ratios = {}
+    for k, v in kwargs.items():
+        if k in dotted_to_underscore:
+            ratios[dotted_to_underscore[k]] = v
+        elif k in layer_keys:
+            ratios[k] = v
+    return ratios
+
+
+def scale_model_by_prefix(model, ratios: dict, prefix: str = "diffusion_model."):
+    """Clone `model` and multiply each weight by longest_prefix_match(key, ratios)."""
+    m = model.clone()
+    for key, patch in m.get_key_patches(prefix).items():
+        key_inner = key[len(prefix):]
+        scale = longest_prefix_match(key_inner, ratios)
+        if scale != 1.0:
+            # add_patches computes: output = weight * strength_model + patch * strength_patch.
+            # Using patch == weight itself: weight * 1.0 + weight * (scale - 1.0) = weight * scale.
+            m.add_patches({key: patch}, scale - 1.0, 1.0)
+    return m
+
+
+def scale_vae_sd(vae, ratios: dict, skip_dtypes: set = frozenset()):
+    """Return a new VAE with each tensor multiplied by longest_prefix_match(key, ratios)."""
+    sd = vae.get_sd()
+    new_sd = {}
+    for key, tensor in sd.items():
+        if tensor.dtype in skip_dtypes:
+            new_sd[key] = tensor
+            continue
+        scale = longest_prefix_match(key, ratios)
+        new_sd[key] = tensor * scale if scale != 1.0 else tensor
+    return comfy.sd.VAE(sd=new_sd)
+
+
+def merge_vae_sd(vae1, vae2, ratios: dict, default_ratio: float = 0.5):
+    """Blend two VAE state dicts key-by-key: (1-ratio)*vae1 + ratio*vae2."""
+    sd1, sd2 = vae1.get_sd(), vae2.get_sd()
+    new_sd = {}
+    for key, tensor in sd1.items():
+        if key not in sd2:
+            new_sd[key] = tensor
+            continue
+        ratio = longest_prefix_match(key, ratios) if ratios else default_ratio
+        new_sd[key] = tensor * (1.0 - ratio) + sd2[key] * ratio
+    for key, tensor in sd2.items():
+        new_sd.setdefault(key, tensor)
+    return comfy.sd.VAE(sd=new_sd)
+
+
+def numbered_keys(prefix: str, count: int, suffix: str = ".", start: int = 0) -> list[str]:
+    """e.g. numbered_keys("layers.", 3) -> ["layers.0.", "layers.1.", "layers.2."]"""
+    return [f"{prefix}{i}{suffix}" for i in range(start, start + count)]
+
+
+# ------------------------------------------------------------------------------
+# Node: Key Name Inspector
+# ------------------------------------------------------------------------------
+
+class KeyNameInspector(io.ComfyNode):
+    """Debug node: lists internal weight key names for MODEL / CLIP / VAE inputs,
+    passing every input through unchanged."""
+
     @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {},
-            "optional": {
-                "model": ("MODEL",),
-                "clip": ("CLIP",),
-                "vae": ("VAE",),
-            },
-        }
- 
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "STRING")
-    RETURN_NAMES = ("model", "clip", "vae", "keys_report")
-    FUNCTION = "inspect"
-    CATEGORY = "advanced/debug"
-    DESCRIPTION = (
-        "Inspect internal weight key names for MODEL, CLIP, and/or VAE inputs. "
-        "Passes all inputs through unchanged; outputs a combined STRING report "
-        "and also prints it to the console."
-    )
- 
-    # ------------------------------------------------------------------
-    # 各種入力からキー一覧を取り出すヘルパー
-    # ------------------------------------------------------------------
- 
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_KeyNameInspector",
+            display_name="Key Name Inspector",
+            category="advanced/debug",
+            description="Inspect internal weight key names for MODEL, CLIP, and/or VAE inputs. "
+                        "Passes all inputs through unchanged; outputs a combined STRING report "
+                        "and also prints it to the console.",
+            inputs=[
+                io.Model.Input("model", optional=True),
+                io.Clip.Input("clip", optional=True),
+                io.Vae.Input("vae", optional=True),
+            ],
+            outputs=[
+                io.Model.Output(display_name="model"),
+                io.Clip.Output(display_name="clip"),
+                io.Vae.Output(display_name="vae"),
+                io.String.Output(display_name="keys_report"),
+            ],
+        )
+
     @staticmethod
-    def _keys_from_model(model):
-        """MODEL (ModelPatcher) から diffusion_model 以下のキーを取得する"""
+    def _keys_from_model(model) -> list[str]:
         try:
-            kp = model.get_key_patches("diffusion_model.")
-            return sorted(kp.keys())
+            return sorted(model.get_key_patches("diffusion_model.").keys())
         except Exception as e:
             LOGGER.warning("KeyNameInspector: failed to read MODEL keys: %s", e)
             return []
- 
+
     @staticmethod
-    def _keys_from_clip(clip):
-        """CLIP から state dict の全キーを取得する"""
+    def _keys_from_clip(clip) -> list[str]:
         try:
-            sd = clip.get_sd()
-            return sorted(sd.keys())
+            return sorted(clip.get_sd().keys())
         except Exception as e:
             LOGGER.warning("KeyNameInspector: failed to read CLIP keys: %s", e)
             return []
- 
+
     @staticmethod
-    def _keys_from_vae(vae):
-        """VAE から state dict の全キーを取得する"""
-        # ComfyUIのVAEオブジェクトは get_sd() を持つ場合と
-        # 内部の first_stage_model.state_dict() しか持たない場合があるため
-        # 両方に対応する
+    def _keys_from_vae(vae) -> list[str]:
+        # VAE objects may expose get_sd() or only first_stage_model.state_dict().
         try:
             if hasattr(vae, "get_sd"):
-                sd = vae.get_sd()
-                return sorted(sd.keys())
+                return sorted(vae.get_sd().keys())
         except Exception as e:
             LOGGER.warning("KeyNameInspector: VAE.get_sd() failed: %s", e)
- 
         try:
             if hasattr(vae, "first_stage_model"):
-                sd = vae.first_stage_model.state_dict()
-                return sorted(sd.keys())
+                return sorted(vae.first_stage_model.state_dict().keys())
         except Exception as e:
-            LOGGER.warning(
-                "KeyNameInspector: VAE.first_stage_model.state_dict() failed: %s",
-                e,
-            )
- 
+            LOGGER.warning("KeyNameInspector: VAE.first_stage_model.state_dict() failed: %s", e)
         return []
- 
-    # ------------------------------------------------------------------
-    # レポート整形
-    # ------------------------------------------------------------------
- 
+
     @staticmethod
-    def _format_section(title, keys, max_console_lines=80):
-        """コンソール出力とレポート文字列の両方に使うセクションを組み立てる"""
+    def _format_section(title: str, keys: list[str], max_console_lines: int = 80) -> str:
         print("=" * 80)
         print(f"[KeyNameInspector] {title}: total keys = {len(keys)}")
         for k in keys[:max_console_lines]:
@@ -116,1844 +173,918 @@ class KeyNameInspector:
         if len(keys) > max_console_lines:
             print(f"  ... and {len(keys) - max_console_lines} more")
         print("=" * 80)
- 
-        lines = [f"### {title} (total keys: {len(keys)}) ###"]
-        lines.extend(keys)
+
+        lines = [f"### {title} (total keys: {len(keys)}) ###", *keys]
         return "\n".join(lines)
- 
-    # ------------------------------------------------------------------
-    # メイン処理
-    # ------------------------------------------------------------------
- 
-    def inspect(self, model=None, clip=None, vae=None):
+
+    @classmethod
+    def execute(cls, model=None, clip=None, vae=None) -> io.NodeOutput:
         sections = []
- 
         if model is not None:
-            keys = self._keys_from_model(model)
-            sections.append(self._format_section("MODEL keys (diffusion_model.)", keys))
- 
+            sections.append(cls._format_section("MODEL keys (diffusion_model.)", cls._keys_from_model(model)))
         if clip is not None:
-            keys = self._keys_from_clip(clip)
-            sections.append(self._format_section("CLIP keys", keys))
- 
+            sections.append(cls._format_section("CLIP keys", cls._keys_from_clip(clip)))
         if vae is not None:
-            keys = self._keys_from_vae(vae)
-            sections.append(self._format_section("VAE keys", keys))
- 
-        if not sections:
-            report = (
-                "KeyNameInspector: no input connected "
-                "(model / clip / vae はすべて未接続です)"
-            )
-            print(report)
-        else:
+            sections.append(cls._format_section("VAE keys", cls._keys_from_vae(vae)))
+
+        if sections:
             report = "\n\n".join(sections)
- 
-        return (model, clip, vae, report)
+        else:
+            report = "KeyNameInspector: no input connected (model / clip / vae all unconnected)"
+            print(report)
+
+        return io.NodeOutput(model, clip, vae, report)
 
 
-class ModelScaleSDXL(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    """
-    SDXL モデルの特定の層をスケーリングするノード。
-    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
-    ModelMergeBlocksを継承し、単一モデルの各層に対してスケール係数を適用します。
-    """
+# ------------------------------------------------------------------------------
+# Model-specific layer key tables
+#
+# Each table lists the dot-separated prefixes used for longest-prefix-match
+# scaling/merging of a given architecture's diffusion_model weights.
+# ------------------------------------------------------------------------------
 
-    CATEGORY = "advanced/model_merging/model_specific"
+_SDXL_LAYER_KEYS = [
+    "time_embed.", "label_emb.",
+    *numbered_keys("input_blocks.", 9, suffix=""),
+    *numbered_keys("middle_block.", 3, suffix=""),
+    *numbered_keys("output_blocks.", 9, suffix=""),
+    "out.",
+]
 
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"model": ("MODEL",)}
+_HIDREAM_LAYER_KEYS = [
+    "x_embedder.", "t_embedder.", "caption_projection.",
+    *numbered_keys("double_stream_blocks.", 13),
+    *numbered_keys("single_stream_blocks.", 32),
+]
 
-        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
+_QWEN_IMAGE_LAYER_KEYS = [
+    "pos_embeds.", "img_in.", "txt_norm.", "txt_in.", "time_text_embed.",
+    *numbered_keys("transformer_blocks.", 60),
+    "proj_out.",
+]
 
-        arg_dict["time_embed."] = argument
-        arg_dict["label_emb."] = argument
+_Z_IMAGE_LAYER_KEYS = [
+    "cap_embedder.", "cap_pad_token",
+    *numbered_keys("context_refiner.", 2),
+    *numbered_keys("layers.", 30),
+    *numbered_keys("noise_refiner.", 2),
+    "final_layer.", "t_embedder.", "x_embedder.", "x_pad_token",
+]
 
-        for i in range(9):
-            arg_dict["input_blocks.{}".format(i)] = argument
+# Krea2 uses ComfyUI's internal (post-load) module names rather than the
+# safetensors key names; see class docstring for the safetensors -> internal mapping.
+_KREA2_LAYER_KEYS = [
+    "first.", "txtmlp.", "tmlp.", "tproj.",
+    *numbered_keys("txtfusion.refiner_blocks.", 2),
+    *numbered_keys("txtfusion.layerwise_blocks.", 2),
+    "txtfusion.projector.",
+    *numbered_keys("blocks.", 28),
+    "last.",
+]
 
-        for i in range(3):
-            arg_dict["middle_block.{}".format(i)] = argument
+_FLUX2_KLEIN_LAYER_KEYS = [
+    "img_in.", "time_in.", "txt_in.",
+    *[key for i in range(5) for key in (
+        f"double_blocks.{i}.",
+        f"double_blocks.{i}.img_attn.",
+        f"double_blocks.{i}.img_mlp.",
+        f"double_blocks.{i}.txt_attn.",
+        f"double_blocks.{i}.txt_mlp.",
+    )],
+    "double_stream_modulation_img.", "double_stream_modulation_txt.",
+    *numbered_keys("single_blocks.", 20),
+    "single_stream_modulation.", "final_layer.",
+]
 
-        for i in range(9):
-            arg_dict["output_blocks.{}".format(i)] = argument
+_ERNIE_IMAGE_LAYER_KEYS = [
+    "x_embedder.", "text_proj.", "time_embedding.",
+    *[key for i in range(36) for key in (
+        f"layers.{i}.",
+        f"layers.{i}.self_attention.",
+        f"layers.{i}.self_attention.to_q.",
+        f"layers.{i}.self_attention.to_k.",
+        f"layers.{i}.self_attention.to_v.",
+        f"layers.{i}.self_attention.to_out.",
+        f"layers.{i}.self_attention.norm_q.",
+        f"layers.{i}.self_attention.norm_k.",
+        f"layers.{i}.mlp.",
+        f"layers.{i}.mlp.gate_proj.",
+        f"layers.{i}.mlp.up_proj.",
+        f"layers.{i}.mlp.linear_fc2.",
+        f"layers.{i}.adaLN_mlp_ln.",
+        f"layers.{i}.adaLN_sa_ln.",
+    )],
+    "adaLN_modulation.", "final_norm.", "final_linear.",
+]
 
-        arg_dict["out."] = argument
+_HIDREAM_O1_LAYER_KEYS = [
+    "x_embedder.", "t_embedder1.", "final_layer2.", "lm_head.",
+    *numbered_keys("language_model.layers.", 36),
+    *numbered_keys("visual.blocks.", 27),
+    "visual.merger.", "visual.deepstack_merger_list.", "visual.patch_embed.", "visual.pos_embed.",
+]
 
-        return {"required": arg_dict}
+_CLIP_SDXL_LAYER_KEYS = [
+    "clip_l.embeddings",
+    *numbered_keys("clip_l.encoder.layers.", 12, suffix=""),
+    "clip_l.final_layer_norm",
+    "clip_g.embeddings",
+    *numbered_keys("clip_g.encoder.layers.", 32, suffix=""),
+    "clip_g.final_layer_norm", "clip_g.text_projection",
+]
 
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "scale"
+_CLIP_QWEN_LAYER_KEYS = [
+    "model.embed_tokens", "visual.patch_embed",
+    *numbered_keys("visual.blocks.", 32, suffix=""),
+    "visual.merger",
+    *numbered_keys("model.layers.", 28, suffix=""),
+    "model.norm", "lm_head",
+]
 
-    def scale(self, model, **kwargs):
-        """
-        モデルの各層をスケーリングする
+_VAE_SDXL_LAYER_KEYS = [
+    "quant_conv", "post_quant_conv",
+    "encoder.conv_in",
+    *numbered_keys("encoder.down.", 4),
+    "encoder.mid.attn_1.", "encoder.mid.block_1.", "encoder.mid.block_2.",
+    "encoder.norm_out", "encoder.conv_out",
+    "decoder.conv_in",
+    "decoder.mid.attn_1.", "decoder.mid.block_1.", "decoder.mid.block_2.",
+    *numbered_keys("decoder.up.", 4),
+    "decoder.norm_out", "decoder.conv_out",
+]
 
-        Args:
-            model: 入力モデル
-            **kwargs: 各層のスケール値
+_VAE_FLUX_LAYER_KEYS = [
+    "encoder.conv_in", "encoder.conv_out", "encoder.norm_out",
+    *numbered_keys("encoder.down.", 4),
+    *[f"encoder.down.{i}.block.{j}." for i in range(4) for j in range(3)],
+    *numbered_keys("encoder.down.", 3, suffix=".downsample."),
+    "encoder.mid.", "encoder.mid.block_1.", "encoder.mid.block_2.", "encoder.mid.attn_1.",
+    "decoder.conv_in", "decoder.conv_out", "decoder.norm_out",
+    *numbered_keys("decoder.up.", 4),
+    *[f"decoder.up.{i}.block.{j}." for i in range(4) for j in range(3)],
+    *numbered_keys("decoder.up.", 3, suffix=".upsample.", start=1),
+    "decoder.mid.", "decoder.mid.block_1.", "decoder.mid.block_2.", "decoder.mid.attn_1.",
+]
 
-        Returns:
-            tuple: スケーリング済みモデル
-        """
-        m = model.clone()
+_VAE_FLUX2_LAYER_KEYS = [
+    "quant_conv", "post_quant_conv",
+    "encoder.conv_in", "encoder.conv_out", "encoder.norm_out",
+    *numbered_keys("encoder.down.", 4),
+    "encoder.mid.attn_1.", "encoder.mid.block_1.", "encoder.mid.block_2.",
+    "decoder.conv_in", "decoder.conv_out", "decoder.norm_out",
+    "decoder.mid.attn_1.", "decoder.mid.block_1.", "decoder.mid.block_2.",
+    *numbered_keys("decoder.up.", 4),
+]
+_VAE_FLUX2_SKIP_DTYPES = {torch.int32, torch.int64, torch.bool}
 
-        # diffusion_model 以下のパラメータを対象とする
-        kp = m.get_key_patches("diffusion_model.")
+_VAE_QWEN_LAYER_KEYS = [
+    "conv1", "conv2",
+    "encoder.conv1",
+    *numbered_keys("encoder.downsamples.", 11),
+    "encoder.middle.0.", "encoder.middle.1.", "encoder.middle.2.",
+    "encoder.head.",
+    "decoder.conv1",
+    "decoder.middle.0.", "decoder.middle.1.", "decoder.middle.2.",
+    *numbered_keys("decoder.upsamples.", 15),
+    "decoder.head.",
+]
 
-        for k in kp:
-            scale_value = 1.0
-            k_unet = k[len("diffusion_model."):]
-
-            # 最も長く一致するプレフィックスを探す
-            matched_arg_len = 0
-            for arg_name, arg_value in kwargs.items():
-                if k_unet.startswith(arg_name) and len(arg_name) > matched_arg_len:
-                    scale_value = arg_value
-                    matched_arg_len = len(arg_name)
-
-            # W_new = W * scale_value
-            # add_patches: output = W * strength_model + P * strength_patch
-            # P = W（元の重み）なので: output = W * 1.0 + W * (scale_value - 1.0) = W * scale_value
-            if scale_value != 1.0:
-                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
-
-        return (m,)
-
-class ModelMergeHiDream(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = "Merge node for HiDream series models (Full, Dev, Fast). Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31 based on provided keys."
-
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"model1": ("MODEL",), "model2": ("MODEL",)}
-
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
-
-        arg_dict["x_embedder."] = argument
-        arg_dict["t_embedder."] = argument
-        arg_dict["caption_projection."] = argument
-
-        for i in range(13):
-            arg_dict["double_stream_blocks.{}.".format(i)] = argument
-
-        for i in range(32):
-            arg_dict["single_stream_blocks.{}.".format(i)] = argument
-
-        return {"required": arg_dict}
-
-    
-class ModelScaleHiDream:
-    """
-    HiDream系モデル（Full, Dev, Fast）の特定の層をスケーリングするノード。
-    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
-    double_stream_blocks 0-12 と single_stream_blocks 0-31 に対応。
-    """
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"model": ("MODEL",)}
-        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-        
-        # 基本コンポーネント
-        arg_dict["x_embedder."] = argument
-        arg_dict["t_embedder."] = argument
-        arg_dict["caption_projection."] = argument
-        
-        # Double Stream Blocks (0-12)
-        for i in range(13):
-            arg_dict["double_stream_blocks.{}.".format(i)] = argument
-        
-        # Single Stream Blocks (0-31)
-        for i in range(32):
-            arg_dict["single_stream_blocks.{}.".format(i)] = argument
-        
-        return {"required": arg_dict}
-    
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = "Scale specific layers of HiDream series models (Full, Dev, Fast). Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31."
-    
-    def scale(self, model, **kwargs):
-        # モデルの複製
-        m = model.clone()
-        
-        # スケーリング比率の辞書（'model'キー以外を抽出）
-        ratios = {k: v for k, v in kwargs.items() if k != "model"}
-        
-        # モデルのパッチ可能なキー（重み）を取得
-        kp = m.get_key_patches("diffusion_model.")
-        
-        # 全ての重みキーに対してスケーリングを適用
-        for k in kp:
-            scale_value = 1.0
-            # diffusion_model. を除いた純粋なレイヤー名
-            k_unet = k[len("diffusion_model."):]
-            
-            # 最も長く一致するプレフィックスを探すロジック
-            matched_arg_len = 0
-            for arg_name, arg_value in ratios.items():
-                if k_unet.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale_value = arg_value
-                        matched_arg_len = len(arg_name)
-            
-            # スケーリングの適用
-            # scale_value != 1.0 の場合のみパッチを適用
-            if scale_value != 1.0:
-                # kp[k] はすでに適切なパッチ形式
-                # add_patches(patches_dict, strength_patch, strength_model)
-                # 出力 = weight * strength_model + patch * strength_patch
-                # スケーリングを実現: weight * scale_value
-                # = weight * 1.0 + weight * (scale_value - 1.0)
-                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
-        
-        return (m,)
+_VAE_WAN_VIDEO_LAYER_KEYS = [
+    "conv1.", "conv2.",
+    "encoder.conv1.", "encoder.head.", "encoder.middle.",
+    "encoder.middle.0.", "encoder.middle.1.", "encoder.middle.2.",
+    *numbered_keys("encoder.downsamples.", 11),
+    "decoder.conv1.", "decoder.head.", "decoder.middle.",
+    "decoder.middle.0.", "decoder.middle.1.", "decoder.middle.2.",
+    *numbered_keys("decoder.upsamples.", 15),
+]
 
 
-class ModelScaleQwenImage:
-    """
-    Qwen Image Modelの特定の層をスケーリングするノード。
-    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
-    """
+# ------------------------------------------------------------------------------
+# Node: Model Scale SDXL
+# ------------------------------------------------------------------------------
 
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"model": ("MODEL",)}
-
-        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0程度に設定）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
-        # 基本コンポーネント
-        arg_dict["pos_embeds."] = argument
-        arg_dict["img_in."] = argument
-        arg_dict["txt_norm."] = argument
-        arg_dict["txt_in."] = argument
-        arg_dict["time_text_embed."] = argument
-
-        # Transformer Block (0-59)
-        for i in range(60):
-            arg_dict["transformer_blocks.{}.".format(i)] = argument
-
-        arg_dict["proj_out."] = argument
-
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-
-    def scale(self, model, **kwargs):
-        # モデルの複製
-        m = model.clone()
-
-        # スケーリング比率の辞書（'model'キー以外を抽出）
-        ratios = {k: v for k, v in kwargs.items() if k != "model"}
-
-        # モデルのパッチ可能なキー（重み）を取得
-        # diffusion_model 以下のパラメータを対象とする
-        kp = m.get_key_patches("diffusion_model.")
-
-        # 全ての重みキーに対してスケーリングを適用
-        for k in kp:
-            scale_value = 1.0
-            # diffusion_model. を除いた純粋なレイヤー名
-            k_unet = k[len("diffusion_model.") :]
-
-            # 最も長く一致するプレフィックスを探すロジック（ModelMergeBlocks参照）
-            matched_arg_len = 0
-            for arg_name, arg_value in ratios.items():
-                if k_unet.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale_value = arg_value
-                        matched_arg_len = len(arg_name)
-
-            # スケーリングの適用
-            # ComfyUIのadd_patchesは (patch, strength_patch, strength_model) を計算する
-            # Output = W * strength_model + P * strength_patch
-            # スケーリングを行うため: W_new = W * scale_value としたい
-            # ここでは W * 1.0 + W * (scale_value - 1.0) として実装する
-            if scale_value != 1.0:
-                # kp[k] は (tensor,) のタプル
-                weight_tensor = kp[k][0]
-                # 元の重みに対して (scale - 1.0) 分をパッチとして追加することで乗算を実現
-                m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
-
-        return (m,)
-
-class ModelMergeZImage(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    """
-    Z-Image Model専用のマージノード。
-    各層ごとに異なるマージ比率を設定できます。
-    ratio=1.0 でmodel2を100%使用、ratio=0.0 でmodel1を100%使用します。
-    """
-    
-    CATEGORY = "advanced/model_merging/model_specific"
+class ModelScaleSDXL(io.ComfyNode):
+    """Scale SDXL model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
 
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {
-            "model1": ("MODEL",),
-            "model2": ("MODEL",)
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleSDXL",
+            display_name="Model Scale SDXL",
+            category="advanced/model_merging/model_specific",
+            inputs=build_scale_inputs(_SDXL_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
 
-        # マージ比率の引数設定（デフォルト1.0、範囲は0.0〜1.0）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
-
-        # Caption Embedder
-        arg_dict["cap_embedder."] = argument
-        arg_dict["cap_pad_token"] = argument
-        
-        # Context Refiner (2層: 0-1)
-        for i in range(2):
-            arg_dict["context_refiner.{}.".format(i)] = argument
-        
-        # Main Layers (30層: 0-29)
-        for i in range(30):
-            arg_dict["layers.{}.".format(i)] = argument
-        
-        # Noise Refiner (2層: 0-1)
-        for i in range(2):
-            arg_dict["noise_refiner.{}.".format(i)] = argument
-        
-        # Final Layer
-        arg_dict["final_layer."] = argument
-        
-        # Time Embedder
-        arg_dict["t_embedder."] = argument
-        
-        # Image Embedder
-        arg_dict["x_embedder."] = argument
-        arg_dict["x_pad_token"] = argument
-
-        return {"required": arg_dict}
-
-
-class ModelScaleZImage:
-    """
-    Z-Image Modelの特定の層をスケーリングするノード。
-    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
-    """
-    
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"model": ("MODEL",)}
-        
-        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-        
-        # Caption Embedder
-        arg_dict["cap_embedder."] = argument
-        arg_dict["cap_pad_token"] = argument
-        
-        # Context Refiner (2層)
-        for i in range(2):
-            arg_dict["context_refiner.{}.".format(i)] = argument
-        
-        # Main Layers (30層: 0-29)
-        for i in range(30):
-            arg_dict["layers.{}.".format(i)] = argument
-        
-        # Noise Refiner (2層)
-        for i in range(2):
-            arg_dict["noise_refiner.{}.".format(i)] = argument
-        
-        # Final Layer
-        arg_dict["final_layer."] = argument
-        
-        # Time Embedder
-        arg_dict["t_embedder."] = argument
-        
-        # Image Embedder
-        arg_dict["x_embedder."] = argument
-        arg_dict["x_pad_token"] = argument
-        
-        return {"required": arg_dict}
-    
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-    
-    def scale(self, model, **kwargs):
-        """
-        モデルの各層をスケーリングする
-        
-        Args:
-            model: 入力モデル
-            **kwargs: 各層のスケール値
-            
-        Returns:
-            tuple: スケーリング済みモデル
-        """
-        # モデルの複製
-        m = model.clone()
-        
-        # スケーリング比率の辞書（'model'キー以外を抽出）
-        ratios = {k: v for k, v in kwargs.items() if k != "model"}
-        
-        # モデルのパッチ可能なキー（重み）を取得
-        # diffusion_model 以下のパラメータを対象とする
-        kp = m.get_key_patches("diffusion_model.")
-        
-        # 全ての重みキーに対してスケーリングを適用
-        for k in kp:
-            scale_value = 1.0
-            
-            # diffusion_model. を除いた純粋なレイヤー名
-            k_unet = k[len("diffusion_model."):]
-            
-            # 最も長く一致するプレフィックスを探すロジック
-            # （ModelMergeBlocks参照）
-            matched_arg_len = 0
-            for arg_name, arg_value in ratios.items():
-                if k_unet.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale_value = arg_value
-                        matched_arg_len = len(arg_name)
-            
-            # スケーリングの適用
-            # ComfyUIのadd_patchesは (patch, strength_patch, strength_model) を計算する
-            # Output = W * strength_model + P * strength_patch
-            # スケーリングを行うため: W_new = W * scale_value としたい
-            # ここでは W * scale_value として実装
-            if scale_value != 1.0:
-                # kp[k] は元の重みパッチ情報
-                # scale_value を適用したパッチを作成
-                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
-        
-        return (m,)
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
 
 
-class ModelScaleKrea2:
-    """
-    Krea2 (Krea-2-Turbo) Modelの特定の層をスケーリングするノード。
-    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
- 
-    注意: ここでのプレフィックスは safetensors 上のキー名ではなく、
-    ComfyUI がモデルをロードした後の内部モジュール名(nn.Module属性名)に
-    合わせています。UNETLoader経由でロードすると以下のようにリネームされます:
- 
-      safetensors上のキー                  -> ComfyUI内部キー (diffusion_model.以下)
-      img_in.*                              -> first.*
-      txt_in.*                              -> txtmlp.*
-      time_embed.*                          -> tmlp.*
-      time_mod_proj.*                       -> tproj.*
-      text_fusion.refiner_blocks.{0,1}.*    -> txtfusion.refiner_blocks.{0,1}.*
-      text_fusion.layerwise_blocks.{0,1}.*  -> txtfusion.layerwise_blocks.{0,1}.*
-      text_fusion.projector.*               -> txtfusion.projector.*
-      transformer_blocks.{0..27}.*          -> blocks.{0..27}.*
-      final_layer.*                         -> last.*
-    """
- 
-    NUM_BLOCKS = 28
-    NUM_REFINER_BLOCKS = 2
-    NUM_LAYERWISE_BLOCKS = 2
- 
+# ------------------------------------------------------------------------------
+# Node: Model Merge HiDream
+# ------------------------------------------------------------------------------
+
+class ModelMergeHiDream(io.ComfyNode):
+    """Merge node for HiDream series models (Full, Dev, Fast).
+    Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31."""
+
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"model": ("MODEL",)}
- 
-        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
- 
-        # Image Embedder (旧 img_in)
-        arg_dict["first."] = argument
- 
-        # Text Embedder / メインDiT側 (旧 txt_in)
-        arg_dict["txtmlp."] = argument
- 
-        # Time Embedder (旧 time_embed)
-        arg_dict["tmlp."] = argument
- 
-        # Time Modulation Projection (旧 time_mod_proj)
-        arg_dict["tproj."] = argument
- 
-        # Text Fusion: Context Refiner (2層)
-        for i in range(s.NUM_REFINER_BLOCKS):
-            arg_dict["txtfusion.refiner_blocks.{}.".format(i)] = argument
- 
-        # Text Fusion: Layerwise Blocks (2層)
-        for i in range(s.NUM_LAYERWISE_BLOCKS):
-            arg_dict["txtfusion.layerwise_blocks.{}.".format(i)] = argument
- 
-        # Text Fusion: Projector
-        arg_dict["txtfusion.projector."] = argument
- 
-        # Main Transformer Blocks (28層: 0-27)
-        for i in range(s.NUM_BLOCKS):
-            arg_dict["blocks.{}.".format(i)] = argument
- 
-        # Final Layer (旧 final_layer)
-        arg_dict["last."] = argument
- 
-        return {"required": arg_dict}
- 
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
- 
-    def scale(self, model, **kwargs):
-        """
-        モデルの各層をスケーリングする
- 
-        Args:
-            model: 入力モデル
-            **kwargs: 各層のスケール値
- 
-        Returns:
-            tuple: スケーリング済みモデル
-        """
-        # モデルの複製
-        m = model.clone()
- 
-        # スケーリング比率の辞書（'model'キー以外を抽出）
-        ratios = {k: v for k, v in kwargs.items() if k != "model"}
- 
-        # モデルのパッチ可能なキー（重み）を取得
-        # diffusion_model 以下のパラメータを対象とする
-        kp = m.get_key_patches("diffusion_model.")
- 
-        # 全ての重みキーに対してスケーリングを適用
-        for k in kp:
-            scale_value = 1.0
- 
-            # diffusion_model. を除いた純粋なレイヤー名
-            k_unet = k[len("diffusion_model."):]
- 
-            # 最も長く一致するプレフィックスを探すロジック
-            # （ModelMergeBlocks参照）
-            matched_arg_len = 0
-            for arg_name, arg_value in ratios.items():
-                if k_unet.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale_value = arg_value
-                        matched_arg_len = len(arg_name)
- 
-            # スケーリングの適用
-            # ComfyUIのadd_patchesは (patch, strength_patch, strength_model) を計算する
-            # Output = W * strength_model + P * strength_patch
-            # スケーリングを行うため: W_new = W * scale_value としたい
-            # ここでは strength_model = scale_value - 1.0, strength_patch = 1.0 として実装
-            if scale_value != 1.0:
-                # kp[k] は元の重みパッチ情報
-                m.add_patches({k: kp[k]}, scale_value - 1.0, 1.0)
- 
-        return (m,)
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelMergeHiDream",
+            display_name="Model Merge HiDream",
+            category="advanced/model_merging/model_specific",
+            description="Merge node for HiDream series models (Full, Dev, Fast). "
+                        "Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31.",
+            inputs=[
+                io.Model.Input("model1"),
+                io.Model.Input("model2"),
+                *[io.Float.Input(key, **_RATIO_ARG) for key in _HIDREAM_LAYER_KEYS],
+            ],
+            outputs=single_output(io.Model),
+        )
 
-    
-class ModelScaleFlux2Klein:
-    """
-    FLUX2 Klein Modelの特定の層をスケーリングするノード。
-    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
+    @classmethod
+    def execute(cls, model1, model2, **kwargs) -> io.NodeOutput:
+        m = model1.clone()
+        kp = model2.get_key_patches("diffusion_model.")
+        for key in kp:
+            ratio = longest_prefix_match(key[len("diffusion_model."):], kwargs)
+            m.add_patches({key: kp[key]}, 1.0 - ratio, ratio)
+        return io.NodeOutput(m)
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Scale HiDream
+# ------------------------------------------------------------------------------
+
+class ModelScaleHiDream(io.ComfyNode):
+    """Scale HiDream series model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleHiDream",
+            display_name="Model Scale HiDream",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of HiDream series models (Full, Dev, Fast). "
+                        "Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31.",
+            inputs=build_scale_inputs(_HIDREAM_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Scale Qwen Image
+# ------------------------------------------------------------------------------
+
+class ModelScaleQwenImage(io.ComfyNode):
+    """Scale Qwen Image model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleQwenImage",
+            display_name="Model Scale Qwen Image",
+            category="advanced/model_merging/model_specific",
+            inputs=build_scale_inputs(_QWEN_IMAGE_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Merge Z-Image
+# ------------------------------------------------------------------------------
+
+class ModelMergeZImage(io.ComfyNode):
+    """Merge node for Z-Image models. ratio=1.0 uses model2, ratio=0.0 uses model1."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelMergeZImage",
+            display_name="Model Merge Z-Image",
+            category="advanced/model_merging/model_specific",
+            inputs=[
+                io.Model.Input("model1"),
+                io.Model.Input("model2"),
+                *[io.Float.Input(key, **_RATIO_ARG) for key in _Z_IMAGE_LAYER_KEYS],
+            ],
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model1, model2, **kwargs) -> io.NodeOutput:
+        m = model1.clone()
+        kp = model2.get_key_patches("diffusion_model.")
+        for key in kp:
+            ratio = longest_prefix_match(key[len("diffusion_model."):], kwargs)
+            m.add_patches({key: kp[key]}, 1.0 - ratio, ratio)
+        return io.NodeOutput(m)
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Scale Z-Image
+# ------------------------------------------------------------------------------
+
+class ModelScaleZImage(io.ComfyNode):
+    """Scale Z-Image model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleZImage",
+            display_name="Model Scale Z-Image",
+            category="advanced/model_merging/model_specific",
+            inputs=build_scale_inputs(_Z_IMAGE_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Scale Krea2
+# ------------------------------------------------------------------------------
+
+class ModelScaleKrea2(io.ComfyNode):
+    """Scale Krea2 (Krea-2-Turbo) model layers.
+
+    Prefixes match ComfyUI's post-load internal module names, not the
+    safetensors key names. UNETLoader renames as follows:
+      img_in.* -> first.*, txt_in.* -> txtmlp.*, time_embed.* -> tmlp.*,
+      time_mod_proj.* -> tproj.*, text_fusion.* -> txtfusion.*,
+      transformer_blocks.{0..27}.* -> blocks.{0..27}.*, final_layer.* -> last.*
     """
 
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"model": ("MODEL",)}
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleKrea2",
+            display_name="Model Scale Krea2",
+            category="advanced/model_merging/model_specific",
+            inputs=build_scale_inputs(_KREA2_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
 
-        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0に設定）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
-        # 基本コンポーネント
-        arg_dict["img_in."] = argument
-        arg_dict["time_in."] = argument
-        arg_dict["txt_in."] = argument
-
-        # Double Blocks (0-4)
-        for i in range(5):
-            arg_dict["double_blocks.{}.".format(i)] = argument
-            # さらに細かく制御したい場合
-            arg_dict["double_blocks.{}.img_attn.".format(i)] = argument
-            arg_dict["double_blocks.{}.img_mlp.".format(i)] = argument
-            arg_dict["double_blocks.{}.txt_attn.".format(i)] = argument
-            arg_dict["double_blocks.{}.txt_mlp.".format(i)] = argument
-
-        # Double Stream Modulation
-        arg_dict["double_stream_modulation_img."] = argument
-        arg_dict["double_stream_modulation_txt."] = argument
-
-        # Single Blocks (0-19)
-        for i in range(20):
-            arg_dict["single_blocks.{}.".format(i)] = argument
-
-        # Single Stream Modulation
-        arg_dict["single_stream_modulation."] = argument
-
-        # Final Layer
-        arg_dict["final_layer."] = argument
-
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-
-    def scale(self, model, **kwargs):
-        # モデルの複製
-        m = model.clone()
-
-        # スケーリング比率の辞書（'model'キー以外を抽出）
-        ratios = {k: v for k, v in kwargs.items() if k != "model"}
-
-        # モデルのパッチ可能なキー（重み）を取得
-        kp = m.get_key_patches("diffusion_model.")
-
-        # 全ての重みキーに対してスケーリングを適用
-        for k in kp:
-            scale_value = 1.0
-            # diffusion_model. を除いた純粋なレイヤー名
-            k_unet = k[len("diffusion_model."):]
-
-            # 最も長く一致するプレフィックスを探すロジック
-            matched_arg_len = 0
-            for arg_name, arg_value in ratios.items():
-                if k_unet.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale_value = arg_value
-                        matched_arg_len = len(arg_name)
-
-            # スケーリングの適用
-            # scale_value != 1.0 のときのみパッチを追加
-            if scale_value != 1.0:
-                # kp[k] は (tensor,) のタプル
-                weight_tensor = kp[k][0]
-                # 元の重みに対して (scale - 1.0) 分をパッチとして追加することで乗算を実現
-                # Output = W * strength_model + P * strength_patch
-                # W_new = W * 1.0 + W * (scale - 1.0) = W * scale
-                m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
-
-        return (m,)
-
-
-class ModelScaleErnieImage:
-    """
-    ERNIE Image Modelの特定の層をスケーリングするノード。
-    scale=1.0 で元のまま、scale=0.0 でゼロ、1.0以上で強調します。
- 
-    対応モデル: ernie-image.safetensors
-    総テンソル数: 409
-    レイヤー構成: layers.0〜35 (36層)
-    """
- 
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"model": ("MODEL",)}
- 
-        # スケーリング用の引数設定（デフォルト1.0、範囲は0.0〜2.0）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
- 
-        # --- 入力埋め込み系 ---
-        arg_dict["x_embedder."] = argument          # パッチ埋め込み (x_embedder.proj)
-        arg_dict["text_proj."] = argument           # テキスト射影
-        arg_dict["time_embedding."] = argument      # タイムステップ埋め込み (linear_1, linear_2)
- 
-        # --- Transformer Layers (layers.0〜35) ---
-        for i in range(36):
-            # ブロック全体
-            arg_dict["layers.{}.".format(i)] = argument
- 
-            # Self-Attention サブコンポーネント
-            arg_dict["layers.{}.self_attention.".format(i)] = argument
-            arg_dict["layers.{}.self_attention.to_q.".format(i)] = argument
-            arg_dict["layers.{}.self_attention.to_k.".format(i)] = argument
-            arg_dict["layers.{}.self_attention.to_v.".format(i)] = argument
-            arg_dict["layers.{}.self_attention.to_out.".format(i)] = argument
-            arg_dict["layers.{}.self_attention.norm_q.".format(i)] = argument
-            arg_dict["layers.{}.self_attention.norm_k.".format(i)] = argument
- 
-            # MLP サブコンポーネント
-            arg_dict["layers.{}.mlp.".format(i)] = argument
-            arg_dict["layers.{}.mlp.gate_proj.".format(i)] = argument
-            arg_dict["layers.{}.mlp.up_proj.".format(i)] = argument
-            arg_dict["layers.{}.mlp.linear_fc2.".format(i)] = argument
- 
-            # AdaLN (Adaptive Layer Norm) 変調
-            arg_dict["layers.{}.adaLN_mlp_ln.".format(i)] = argument
-            arg_dict["layers.{}.adaLN_sa_ln.".format(i)] = argument
- 
-        # --- 出力層 ---
-        arg_dict["adaLN_modulation."] = argument    # 最終AdaLN変調
-        arg_dict["final_norm."] = argument          # 最終正規化
-        arg_dict["final_linear."] = argument        # 最終線形射影
- 
-        return {"required": arg_dict}
- 
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
- 
-    def scale(self, model, **kwargs):
-        # モデルの複製
-        m = model.clone()
- 
-        # スケーリング比率の辞書（'model'キー以外を抽出）
-        ratios = {k: v for k, v in kwargs.items() if k != "model"}
- 
-        # モデルのパッチ可能なキー（重み）を取得
-        kp = m.get_key_patches("diffusion_model.")
- 
-        # 全ての重みキーに対してスケーリングを適用
-        for k in kp:
-            scale_value = 1.0
-            # diffusion_model. を除いた純粋なレイヤー名
-            k_unet = k[len("diffusion_model."):]
- 
-            # 最も長く一致するプレフィックスを探すロジック
-            matched_arg_len = 0
-            for arg_name, arg_value in ratios.items():
-                if k_unet.startswith(arg_name):
-                    if len(arg_name) > matched_arg_len:
-                        scale_value = arg_value
-                        matched_arg_len = len(arg_name)
- 
-            # scale_value != 1.0 のときのみパッチを追加
-            if scale_value != 1.0:
-                # kp[k] は (tensor,) のタプル
-                weight_tensor = kp[k][0]
-                # 元の重みに対して (scale - 1.0) 分をパッチとして追加することで乗算を実現
-                # W_new = W * 1.0 + W * (scale - 1.0) = W * scale
-                m.add_patches({k: (weight_tensor,)}, scale_value - 1.0, 1.0)
- 
-        return (m,)
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
 
 
-"""
-ModelScaleHiDreamO1Image
-========================
-HiDream-O1-Image (UiT architecture) の特定レイヤーをスケーリングする ComfyUI カスタムノード。
-【設計方針】
-  ComfyUI 標準の MODEL (ModelPatcher) を input/output に使用する。
-  clone() / get_key_patches() / add_patches() という
-  ComfyUI 正規の API でスケーリングを行う。
-  deepcopy・インプレース変更は一切使用しないため安全。
-  patcher.clone() で複製した新しい MODEL を返すので、
-  ローダーキャッシュのオリジナルは書き換わらない。
-HiDream-O1-Image の diffusion_model キー構造:
-  model.language_model.layers.{0-35}.*   LLM バックボーン（36層）
-  model.t_embedder1.*                    タイムステップ埋め込み
-  model.x_embedder.*                     画像パッチ埋め込み
-  model.visual.blocks.{0-26}.*           ViT 視覚エンコーダ（27ブロック）
-  model.visual.merger.*                  ViT マージャー
-  model.visual.deepstack_merger_list.*   ViT ディープスタックマージャー
-  model.visual.patch_embed.*             ViT パッチ埋め込み
-  model.visual.pos_embed.*               ViT 位置埋め込み
-  model.final_layer2.*                   最終出力層
-  lm_head.*                              言語モデルヘッド
-scale=1.0 → 変化なし（スキップ）
-scale=0.0 → そのブロックの重みをゼロ化
-scale>1.0 → 強調
-"""
+# ------------------------------------------------------------------------------
+# Node: Model Scale Flux2 Klein
+# ------------------------------------------------------------------------------
 
-import logging
+class ModelScaleFlux2Klein(io.ComfyNode):
+    """Scale FLUX2 Klein model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
 
-LOGGER = logging.getLogger(__name__)
-
-
-def _resolve_scale(k_inner: str, ratios: dict) -> float:
-    """最長プレフィックス一致でスケール値を返す。マッチなしは 1.0。"""
-    scale_value = 1.0
-    matched_len = 0
-    for prefix, value in ratios.items():
-        if k_inner.startswith(prefix) and len(prefix) > matched_len:
-            scale_value = value
-            matched_len = len(prefix)
-    return scale_value
-
-
-"""
-ModelScaleHiDreamO1Image
-========================
-修正版 - 全テンソルをログに出力するよう変更
-"""
-import logging
-LOGGER = logging.getLogger(__name__)
- 
-def _resolve_scale(k_inner: str, ratios: dict) -> float:
-    """最長プレフィックス一致でスケール値を返す。マッチなしは 1.0。"""
-    scale_value = 1.0
-    matched_len = 0
-    for prefix, value in ratios.items():
-        if k_inner.startswith(prefix) and len(prefix) > matched_len:
-            scale_value = value
-            matched_len = len(prefix)
-    return scale_value
- 
- 
-class ModelScaleHiDreamO1Image:
     @classmethod
-    def INPUT_TYPES(cls):
-        arg_dict = {"model": ("MODEL",)}
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
- 
-        # ── 基本コンポーネント ─────────────────────────────────────────
-        arg_dict["x_embedder."]   = argument
-        arg_dict["t_embedder1."]  = argument
-        arg_dict["final_layer2."] = argument
-        arg_dict["lm_head."]      = argument
- 
-        # ── LLM バックボーン layers.0 〜 layers.35 ────────────────────
-        for i in range(36):
-            arg_dict[f"language_model.layers.{i}."] = argument
- 
-        # ── ViT 視覚エンコーダ blocks.0 〜 blocks.26 ──────────────────
-        for i in range(27):
-            arg_dict[f"visual.blocks.{i}."] = argument
- 
-        # ── ViT マージャー / 埋め込み ──────────────────────────────────
-        arg_dict["visual.merger."]                = argument
-        arg_dict["visual.deepstack_merger_list."] = argument
-        arg_dict["visual.patch_embed."]           = argument
-        arg_dict["visual.pos_embed."]             = argument
- 
-        return {"required": arg_dict}
- 
-    RETURN_TYPES = ("MODEL",)
-    RETURN_NAMES = ("model",)
-    FUNCTION = "scale"
-    CATEGORY = "HiDream O1"
-    DESCRIPTION = (
-        "Scale specific layers of HiDream-O1-Image (UiT architecture). "
-        "Uses ModelPatcher — safe, no deepcopy, no in-place mutation. "
-        "scale=1.0: unchanged | scale=0.0: zero out | scale>1.0: amplify"
-    )
- 
-    def scale(self, model, **kwargs):
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleFlux2Klein",
+            display_name="Model Scale Flux2 Klein",
+            category="advanced/model_merging/model_specific",
+            inputs=build_scale_inputs(_FLUX2_KLEIN_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Scale ERNIE Image
+# ------------------------------------------------------------------------------
+
+class ModelScaleErnieImage(io.ComfyNode):
+    """Scale ERNIE Image model layers (ernie-image.safetensors, layers.0-35)."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleErnieImage",
+            display_name="Model Scale ERNIE Image",
+            category="advanced/model_merging/model_specific",
+            inputs=build_scale_inputs(_ERNIE_IMAGE_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Scale HiDream-O1-Image
+# ------------------------------------------------------------------------------
+
+class ModelScaleHiDreamO1Image(io.ComfyNode):
+    """Scale HiDream-O1-Image (UiT architecture) layers.
+    Uses ModelPatcher clone/patch — no deepcopy, no in-place mutation."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleHiDreamO1Image",
+            display_name="Model Scale HiDream-O1-Image",
+            category="HiDream O1",
+            description="Scale specific layers of HiDream-O1-Image (UiT architecture). "
+                        "scale=1.0: unchanged | scale=0.0: zero out | scale>1.0: amplify",
+            inputs=build_scale_inputs(_HIDREAM_O1_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
         ratios = {k: v for k, v in kwargs.items() if v != 1.0}
         if not ratios:
             LOGGER.info("ModelScaleHiDreamO1Image: all scales are 1.0, skipping.")
-            return (model,)
- 
-        # patcher を取得
-        if hasattr(model, "patcher"):
-            patcher = model.patcher
-        else:
-            patcher = model
- 
+            return io.NodeOutput(model)
+
+        patcher = getattr(model, "patcher", model)
         m = patcher.clone()
- 
-        # ── キー取得 ──────────────────────────────────────────────────
+
         try:
             kp_all = m.get_key_patches()
         except TypeError:
             kp_all = m.get_key_patches("")
- 
         if not kp_all:
             LOGGER.warning("ModelScaleHiDreamO1Image: get_key_patches() returned empty dict.")
-            return (model,)
- 
-        # ── 全テンソルキーをログ出力 ──────────────────────────────────
-        all_keys = list(kp_all.keys())
-        LOGGER.info(
-            "ModelScaleHiDreamO1Image: all keys (%d total):\n%s",
-            len(all_keys),
-            "\n".join(f"  [{i:>5}] {k}" for i, k in enumerate(all_keys)),
-        )
- 
-        # ── 実キーからプレフィックスを自動検出 ───────────────────────
-        PREFIX_CANDIDATES = [
-            "diffusion_model.",
-            "model.",
-            "",
-        ]
+            return io.NodeOutput(model)
+
+        # Auto-detect the active key prefix from the first matching candidate.
         detected_prefix = ""
-        for candidate in PREFIX_CANDIDATES:
-            if candidate == "":
-                detected_prefix = ""
-                break
+        for candidate in ("diffusion_model.", "model."):
             if any(k.startswith(candidate) for k in kp_all):
                 detected_prefix = candidate
                 break
- 
-        LOGGER.info(
-            "ModelScaleHiDreamO1Image: detected key prefix=%r, total keys=%d",
-            detected_prefix, len(kp_all),
-        )
- 
-        # プレフィックスで絞り込み
-        if detected_prefix:
-            kp = {k: v for k, v in kp_all.items() if k.startswith(detected_prefix)}
-        else:
-            kp = kp_all
- 
+
+        kp = {k: v for k, v in kp_all.items() if k.startswith(detected_prefix)} if detected_prefix else kp_all
+
         modified = 0
-        patched_keys = []
- 
-        for k, patch_value in kp.items():
-            k_inner = k[len(detected_prefix):]
-            sv = _resolve_scale(k_inner, ratios)
-            if sv == 1.0:
+        for key, patch in kp.items():
+            scale = longest_prefix_match(key[len(detected_prefix):], ratios)
+            if scale == 1.0:
                 continue
- 
-            m.add_patches({k: patch_value}, sv - 1.0, 1.0)
+            m.add_patches({key: patch}, scale - 1.0, 1.0)
             modified += 1
-            patched_keys.append((k, sv))
- 
-        # ── スケーリングした全テンソルをログ出力 ──────────────────────
-        if patched_keys:
-            LOGGER.info(
-                "ModelScaleHiDreamO1Image: patched keys (%d total):\n%s",
-                len(patched_keys),
-                "\n".join(f"  scale={sv:.4f}  {k}" for k, sv in patched_keys),
-            )
-        else:
-            LOGGER.info("ModelScaleHiDreamO1Image: no keys were patched.")
- 
-        LOGGER.info(
-            "ModelScaleHiDreamO1Image: patched %d / %d keys.",
-            modified, len(kp),
-        )
- 
-        # 結果を返す
+
+        LOGGER.info("ModelScaleHiDreamO1Image: patched %d / %d keys (prefix=%r).",
+                    modified, len(kp), detected_prefix)
+
         try:
             result = model.clone_with_patcher(m)
         except (AttributeError, TypeError):
             result = m
- 
-        return (result,)
+        return io.NodeOutput(result)
 
 
-class CLIPScaleDualSDXLBlock:
-    """
-    SDXL DualCLIP（CLIP-L + CLIP-G）の特定の層をスケーリングするノード
-    scale=1.0 でそのまま、scale=0.0 で完全に抑制
-    """
+# ------------------------------------------------------------------------------
+# Node: CLIP Scale Dual SDXL Block
+# ------------------------------------------------------------------------------
+
+class CLIPScaleDualSDXLBlock(io.ComfyNode):
+    """Scale SDXL Dual CLIP (CLIP-L: 12 layers, CLIP-G: 32 layers)."""
+
+    _SKIP_SUFFIXES = (".position_ids", ".logit_scale")
 
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {
-            "clip": ("CLIP",),
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_CLIPScaleDualSDXLBlock",
+            display_name="CLIP Scale Dual SDXL Block",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of SDXL Dual CLIP (CLIP-L: 12 layers, CLIP-G: 32 layers). "
+                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_CLIP_SDXL_LAYER_KEYS, "clip", io.Clip),
+            outputs=single_output(io.Clip),
+        )
 
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
-        # --- CLIP-L (12 layers) ---
-        arg_dict["clip_l.embeddings"] = argument
-        for i in range(12):
-            arg_dict[f"clip_l.encoder.layers.{i}"] = argument
-        arg_dict["clip_l.final_layer_norm"] = argument
-
-        # --- CLIP-G (32 layers) ---
-        arg_dict["clip_g.embeddings"] = argument
-        for i in range(32):
-            arg_dict[f"clip_g.encoder.layers.{i}"] = argument
-        arg_dict["clip_g.final_layer_norm"] = argument
-        arg_dict["clip_g.text_projection"] = argument
-
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("CLIP",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-
-    DESCRIPTION = "Scale specific layers of SDXL Dual CLIP (CLIP-L: 12 layers, CLIP-G: 32 layers). Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
-
-    def scale(self, clip, **kwargs):
-        # クローンを作成（モデルラッパーのみ、重みは共有）
+    @classmethod
+    def execute(cls, clip, **kwargs) -> io.NodeOutput:
         m = clip.clone()
+        ratios = {k: v for k, v in kwargs.items() if v != 1.0}
+        if not ratios:
+            return io.NodeOutput(m)
 
-        # モデルの全重み（State Dict）を取得
-        # これにより "clip_l.transformer.text_model..." のような完全なキーが取得できます
-        sd = m.get_sd()
-
-        # 設定されたスケール値を辞書として整理
-        scales_args = {k: v for k, v in kwargs.items() if k != "clip" and v != 1.0}
-
-        # 何も変更がない場合はそのまま返す
-        if not scales_args:
-            return (m,)
-
-        # スケールごとに適用するパッチをまとめるための辞書
-        # { scale_value: { key: (weight_tensor,) } }
-        patches_by_scale = {}
-
-        for key, weight in sd.items():
-            # 無視するキー
-            if key.endswith(".position_ids") or key.endswith(".logit_scale"):
+        # SDXL's full state-dict keys are longer than the widget prefixes
+        # (e.g. "clip_l.transformer.text_model...."), so normalize before matching.
+        patches_by_scale: dict[float, dict] = {}
+        for key, weight in m.get_sd().items():
+            if key.endswith(cls._SKIP_SUFFIXES):
                 continue
+            normalized = key.replace(".transformer.text_model.", ".").replace(".text_model.", ".")
+            scale = longest_prefix_match(normalized, ratios)
+            if scale != 1.0:
+                patches_by_scale.setdefault(scale, {})[key] = (weight,)
 
-            # キーのマッチング処理
-            # SDXLの内部キーは "clip_l.transformer.text_model.encoder..." のように長いため
-            # ユーザー引数 ("clip_l.encoder...") とマッチするように正規化します
-            normalized_key = key.replace(".transformer.text_model.", ".")
-            normalized_key = normalized_key.replace(".text_model.", ".")  # 念のため
-
-            target_scale = 1.0
-
-            # 最も具体的にマッチする引数を探す
-            # 例: "clip_l.encoder.layers.0" は "clip_l.encoder" よりも優先されるべき
-            matched_arg_len = 0
-
-            for arg_name, scale_val in scales_args.items():
-                if normalized_key.startswith(arg_name):
-                    # より長いキー名でのマッチを優先（より具体的であるため）
-                    if len(arg_name) > matched_arg_len:
-                        target_scale = scale_val
-                        matched_arg_len = len(arg_name)
-
-            # スケール変更が必要な場合
-            if target_scale != 1.0:
-                if target_scale not in patches_by_scale:
-                    patches_by_scale[target_scale] = {}
-
-                # パッチとして「元の重み」を登録
-                patches_by_scale[target_scale][key] = (weight,)
-
-        # パッチの適用
-        # add_patches({key: (patch,)}, strength_patch, strength_model)
-        # 計算式: Final = Model * strength_model + Patch * strength_patch
-        # ここで Patch = Model なので
-        # Final = Model * 1.0 + Model * (scale - 1.0)
-        #       = Model * (1.0 + scale - 1.0)
-        #       = Model * scale
-        for s, patches in patches_by_scale.items():
-            m.add_patches(patches, s - 1.0, 1.0)
-
-        return (m,)
+        for scale, patches in patches_by_scale.items():
+            # add_patches: output = weight * strength_model + patch * strength_patch.
+            # With patch == weight: weight * 1.0 + weight * (scale - 1.0) = weight * scale.
+            m.add_patches(patches, scale - 1.0, 1.0)
+        return io.NodeOutput(m)
 
 
-class CLIPScaleQwenBlock:
-    """
-    Qwen-2.5-VL-7B CLIPの特定の層をスケーリングするノード
-    scale=1.0 でそのまま、scale=0.0 で完全に抑制
-    """
+# ------------------------------------------------------------------------------
+# Node: CLIP Scale Qwen Block
+# ------------------------------------------------------------------------------
+
+class CLIPScaleQwenBlock(io.ComfyNode):
+    """Scale Qwen-2.5-VL-7B CLIP layers."""
+
+    _SKIP_SUFFIXES = (".position_ids", ".logit_scale")
 
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {
-            "clip": ("CLIP",),
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_CLIPScaleQwenBlock",
+            display_name="CLIP Scale Qwen Block",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of Qwen-2.5-VL-7B CLIP. "
+                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_CLIP_QWEN_LAYER_KEYS, "clip", io.Clip),
+            outputs=single_output(io.Clip),
+        )
 
-        # scale: 1.0 = そのまま, 0.0 = 完全に抑制（ゼロ化）
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-
-        arg_dict["model.embed_tokens"] = argument
-        arg_dict["visual.patch_embed"] = argument
-
-        # Qwen2-VL-7B (Visual: 32 blocks)
-        for i in range(32):
-            arg_dict[f"visual.blocks.{i}"] = argument
-
-        arg_dict["visual.merger"] = argument
-
-        # Qwen2-VL-7B (LLM: 28 layers)
-        for i in range(28):
-            arg_dict[f"model.layers.{i}"] = argument
-
-        arg_dict["model.norm"] = argument
-        arg_dict["lm_head"] = argument
-
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("CLIP",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = "Scale specific layers of Qwen-2.5-VL-7B CLIP. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
-
-    def scale(self, clip, **kwargs):
-        # モデルのクローンを作成
+    @classmethod
+    def execute(cls, clip, **kwargs) -> io.NodeOutput:
         m = clip.clone()
+        ratios = {k: v for k, v in kwargs.items() if v != 1.0}
+        if not ratios:
+            return io.NodeOutput(m)
 
-        # 設定されたスケール値を辞書として整理
-        scales_args = {k: v for k, v in kwargs.items() if k != "clip" and v != 1.0}
-
-        # 何も変更がない場合はそのまま返す
-        if not scales_args:
-            return (m,)
-
-        # キーパッチを取得
-        kp = clip.get_key_patches()
-
-        # スケールごとにパッチをまとめる
-        patches_by_scale = {}
-
-        for key in kp:
-            # 不要なキーをスキップ
-            if key.endswith(".position_ids") or key.endswith(".logit_scale"):
+        patches_by_scale: dict[float, dict] = {}
+        for key, patch in clip.get_key_patches().items():
+            if key.endswith(cls._SKIP_SUFFIXES):
                 continue
+            normalized = key[len("transformer."):] if key.startswith("transformer.") else key
 
-            # キーの正規化
-            # "transformer." プレフィックスを除去（ある場合）
-            normalized_key = key
-            if normalized_key.startswith("transformer."):
-                normalized_key = normalized_key[len("transformer.") :]
-
-            target_scale = 1.0
-            matched_arg_len = 0
-
-            # 引数名とキーの前方一致で判定（最長マッチ）
-            for arg_name, scale_val in scales_args.items():
-                if normalized_key.startswith(arg_name):
-                    # より長くマッチする場合のみ更新
-                    # "model.layers.1" と "model.layers.10" の誤爆を防ぐ
-                    next_char_idx = len(arg_name)
-                    if (
-                        next_char_idx == len(normalized_key)
-                        or normalized_key[next_char_idx] == "."
-                    ):
-                        if len(arg_name) > matched_arg_len:
-                            target_scale = scale_val
-                            matched_arg_len = len(arg_name)
-
-            # スケール変更が必要な場合
-            if target_scale != 1.0:
-                if target_scale not in patches_by_scale:
-                    patches_by_scale[target_scale] = {}
-                patches_by_scale[target_scale][key] = kp[key]
-
-        # パッチの適用
-        # add_patches(patches, strength_patch, strength_model)
-        # Final = Model * strength_model + Patch * strength_patch
-        # 目標: Model * scale なので、Patch = Model として
-        # scale = strength_model + strength_patch
-        # strength_model = 0, strength_patch = scale とする
-        for scale_val, patches in patches_by_scale.items():
-            m.add_patches(patches, scale_val, 0.0)
-
-        return (m,)
-
-
-class VAEMergeSimple:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "vae1": ("VAE",),
-                "vae2": ("VAE",),
-                "ratio": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-            }
-        }
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "merge"
-    CATEGORY = "advanced/model_merging"
-
-    def merge(self, vae1, vae2, ratio):
-        vae1_sd = vae1.get_sd()
-        vae2_sd = vae2.get_sd()
-
-        merged_sd = {}
-        for key in vae1_sd.keys():
-            if key in vae2_sd:
-                merged_sd[key] = (1.0 - ratio) * vae1_sd[key] + ratio * vae2_sd[key]
-            else:
-                merged_sd[key] = vae1_sd[key]
-
-        merged_vae = comfy.sd.VAE(sd=merged_sd)
-        return (merged_vae,)
-
-
-class VAEMergeSubtract:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "vae1": ("VAE",),
-                "vae2": ("VAE",),
-                "multiplier": (
-                    "FLOAT",
-                    {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01},
-                ),
-            }
-        }
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "merge"
-    CATEGORY = "advanced/model_merging"
-
-    def merge(self, vae1, vae2, multiplier):
-        vae1_sd = vae1.get_sd()
-        vae2_sd = vae2.get_sd()
-
-        merged_sd = {}
-        for key in vae1_sd.keys():
-            if key in vae2_sd:
-                merged_sd[key] = vae1_sd[key] - multiplier * vae2_sd[key]
-            else:
-                merged_sd[key] = vae1_sd[key]
-
-        merged_vae = comfy.sd.VAE(sd=merged_sd)
-        return (merged_vae,)
-
-
-class VAEMergeAdd:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "vae1": ("VAE",),
-                "vae2": ("VAE",),
-            }
-        }
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "merge"
-    CATEGORY = "advanced/model_merging"
-
-    def merge(self, vae1, vae2):
-        vae1_sd = vae1.get_sd()
-        vae2_sd = vae2.get_sd()
-
-        merged_sd = {}
-        for key in vae1_sd.keys():
-            if key in vae2_sd:
-                merged_sd[key] = vae1_sd[key] + vae2_sd[key]
-            else:
-                merged_sd[key] = vae1_sd[key]
-
-        merged_vae = comfy.sd.VAE(sd=merged_sd)
-        return (merged_vae,)
-
-
-class VAEScaleSDXLBlock:
-    """
-    SDXL VAEの特定の層をスケーリングするノード
-    scale=1.0 でそのまま、scale=0.0 で完全に抑制
-
-    get_sd() はComfyUI内部のldm形式キーを返す:
-      encoder.down_blocks.N.resnets.M.* -> encoder.down.N.block.M.*
-      encoder.mid_block.resnets.0.*     -> encoder.mid.block_1.*
-      encoder.mid_block.resnets.1.*     -> encoder.mid.block_2.*
-      encoder.mid_block.attentions.0.*  -> encoder.mid.attn_1.*
-      encoder.conv_norm_out.*           -> encoder.norm_out.*
-      decoder.up_blocks.N.*             -> decoder.up.N.*
-      decoder.mid_block.resnets.0.*     -> decoder.mid.block_1.*
-      decoder.mid_block.resnets.1.*     -> decoder.mid.block_2.*
-      decoder.mid_block.attentions.0.*  -> decoder.mid.attn_1.*
-      decoder.conv_norm_out.*           -> decoder.norm_out.*
-    """
-
-    LAYER_KEYS = [
-        # Quantization
-        "quant_conv",
-        "post_quant_conv",
-        # Encoder
-        "encoder.conv_in",
-        *[f"encoder.down.{i}." for i in range(4)],
-        "encoder.mid.attn_1.",
-        "encoder.mid.block_1.",
-        "encoder.mid.block_2.",
-        "encoder.norm_out",
-        "encoder.conv_out",
-        # Decoder
-        "decoder.conv_in",
-        "decoder.mid.attn_1.",
-        "decoder.mid.block_1.",
-        "decoder.mid.block_2.",
-        *[f"decoder.up.{i}." for i in range(4)],
-        "decoder.norm_out",
-        "decoder.conv_out",
-    ]
-
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"vae": ("VAE",)}
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-        for key in s.LAYER_KEYS:
-            arg_dict[key] = argument
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = (
-        "Scale specific layers of SDXL VAE. "
-        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
-    )
-
-    def scale(self, vae, **kwargs):
-        # kwargs のキーを LAYER_KEYS に復元（ComfyUI が "." を "_" に変換する場合に対応）
-        kwarg_to_layer = {
-            layer_key.replace(".", "_"): layer_key
-            for layer_key in self.LAYER_KEYS
-        }
-        ratios = {}
-        for k, v in kwargs.items():
-            if k in kwarg_to_layer:
-                ratios[kwarg_to_layer[k]] = v
-            elif k in self.LAYER_KEYS:
-                ratios[k] = v
-
-        # テンソルのスケーリング
-        sd = vae.get_sd()
-        new_sd = {}
-        for tensor_key, tensor_val in sd.items():
+            # Require an exact segment boundary match to avoid e.g. "layers.1" matching "layers.10".
             scale = 1.0
             matched_len = 0
-            for arg_name, arg_value in ratios.items():
-                if tensor_key.startswith(arg_name) and len(arg_name) > matched_len:
-                    scale = arg_value
-                    matched_len = len(arg_name)
-            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
+            for prefix, value in ratios.items():
+                if normalized.startswith(prefix) and len(prefix) > matched_len:
+                    tail = normalized[len(prefix):]
+                    if tail == "" or tail.startswith("."):
+                        scale = value
+                        matched_len = len(prefix)
+            if scale != 1.0:
+                patches_by_scale.setdefault(scale, {})[key] = patch
 
-        new_vae = comfy.sd.VAE(sd=new_sd)
-        return (new_vae,)
+        for scale, patches in patches_by_scale.items():
+            # Here strength_model=0, strength_patch=scale, since patch already equals weight.
+            m.add_patches(patches, scale, 0.0)
+        return io.NodeOutput(m)
 
 
-class VAEMergeSDXLBlock:
-    """
-    2つのSDXL VAEをブロック単位でマージするノード
-    ratio=1.0 で vae2 を使用、ratio=0.0 で vae1 を使用
+# ------------------------------------------------------------------------------
+# Node: CLIP Save Qwen
+# ------------------------------------------------------------------------------
 
-    get_sd() はComfyUI内部のldm形式キーを返す:
-      encoder.down_blocks.N.resnets.M.* -> encoder.down.N.block.M.*
-      encoder.mid_block.resnets.0.*     -> encoder.mid.block_1.*
-      encoder.mid_block.resnets.1.*     -> encoder.mid.block_2.*
-      encoder.mid_block.attentions.0.*  -> encoder.mid.attn_1.*
-      encoder.conv_norm_out.*           -> encoder.norm_out.*
-      decoder.up_blocks.N.*             -> decoder.up.N.*
-      decoder.mid_block.resnets.0.*     -> decoder.mid.block_1.*
-      decoder.mid_block.resnets.1.*     -> decoder.mid.block_2.*
-      decoder.mid_block.attentions.0.*  -> decoder.mid.attn_1.*
-      decoder.conv_norm_out.*           -> decoder.norm_out.*
-    """
-
-    LAYER_KEYS = [
-        # Quantization
-        "quant_conv",
-        "post_quant_conv",
-        # Encoder
-        "encoder.conv_in",
-        *[f"encoder.down.{i}." for i in range(4)],
-        "encoder.mid.attn_1.",
-        "encoder.mid.block_1.",
-        "encoder.mid.block_2.",
-        "encoder.norm_out",
-        "encoder.conv_out",
-        # Decoder
-        "decoder.conv_in",
-        "decoder.mid.attn_1.",
-        "decoder.mid.block_1.",
-        "decoder.mid.block_2.",
-        *[f"decoder.up.{i}." for i in range(4)],
-        "decoder.norm_out",
-        "decoder.conv_out",
-    ]
+class CLIPSaveQwen(io.ComfyNode):
+    """Save Qwen-2.5-VL-7B CLIP models, stripping the internal 'qwen25_7b.transformer.' prefix."""
 
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {
-            "vae1": ("VAE",),
-            "vae2": ("VAE",),
-        }
-        argument = ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01})
-        for key in s.LAYER_KEYS:
-            arg_dict[key] = argument
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "merge"
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = (
-        "Block-wise merging for SDXL VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2."
-    )
-
-    def merge(self, vae1, vae2, **kwargs):
-        # kwargs のキーを LAYER_KEYS に復元（ComfyUI が "." を "_" に変換する場合に対応）
-        kwarg_to_layer = {
-            layer_key.replace(".", "_"): layer_key
-            for layer_key in self.LAYER_KEYS
-        }
-        ratios = {}
-        for k, v in kwargs.items():
-            if k in kwarg_to_layer:
-                ratios[kwarg_to_layer[k]] = v
-            elif k in self.LAYER_KEYS:
-                ratios[k] = v
-
-        sd1 = vae1.get_sd()
-        sd2 = vae2.get_sd()
-
-        new_sd = {}
-
-        for k in sd1.keys():
-            if k not in sd2:
-                new_sd[k] = sd1[k]
-                continue
-
-            ratio = 0.5
-            matched_len = 0
-            for arg_name, arg_value in ratios.items():
-                if k.startswith(arg_name) and len(arg_name) > matched_len:
-                    ratio = arg_value
-                    matched_len = len(arg_name)
-
-            new_sd[k] = sd1[k] * (1.0 - ratio) + sd2[k] * ratio
-
-        # sd2 にしか存在しないキーはそのまま追加
-        for k in sd2.keys():
-            if k not in new_sd:
-                new_sd[k] = sd2[k]
-
-        new_vae = comfy.sd.VAE(sd=new_sd)
-        return (new_vae,)
-
-
-class VAEScaleFluxBlock:
-    """
-    FLUX1 VAEの特定の層をスケーリングするノード
-    scale=1.0 でそのまま、scale=0.0 で完全に抑制
-
-    FLUX1 AEのget_sd()はldm形式をそのまま返すため、
-    SDXLのようなキーリマップは不要。
-    ただしComfyUIがINPUT_TYPESのキーの"."を"_"に変換して
-    kwargsに渡すため、逆引きテーブルで復元が必要。
-    """
-
-    LAYER_KEYS = [
-        # Encoder
-        "encoder.conv_in",
-        "encoder.conv_out",
-        "encoder.norm_out",
-        *[f"encoder.down.{i}." for i in range(4)],
-        *[f"encoder.down.{i}.block.{j}." for i in range(4) for j in range(3)],
-        *[f"encoder.down.{i}.downsample." for i in range(3)],  # 0-2 のみ
-        "encoder.mid.",
-        "encoder.mid.block_1.",
-        "encoder.mid.block_2.",
-        "encoder.mid.attn_1.",
-        # Decoder
-        "decoder.conv_in",
-        "decoder.conv_out",
-        "decoder.norm_out",
-        *[f"decoder.up.{i}." for i in range(4)],
-        *[f"decoder.up.{i}.block.{j}." for i in range(4) for j in range(3)],
-        *[f"decoder.up.{i}.upsample." for i in range(1, 4)],  # 1-3 のみ
-        "decoder.mid.",
-        "decoder.mid.block_1.",
-        "decoder.mid.block_2.",
-        "decoder.mid.attn_1.",
-    ]
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_CLIPSaveQwen",
+            display_name="CLIP Save Qwen",
+            category="advanced/model_merging/model_specific",
+            description="Saves Qwen-2.5-VL-7B CLIP models by stripping the internal "
+                        "'qwen25_7b.transformer.' prefix.",
+            is_output_node=True,
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("filename_prefix", default="qwen_2.5_vl_merged"),
+            ],
+            outputs=[],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
+        )
 
     @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"vae": ("VAE",)}
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-        for key in s.LAYER_KEYS:
-            arg_dict[key] = argument
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = "Scale specific layers of FLUX1 VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
-
-    def scale(self, vae, **kwargs):
-        # ComfyUI が "." を "_" に変換する場合に備えて逆引きテーブルを作成
-        kwarg_to_layer = {
-            layer_key.replace(".", "_"): layer_key
-            for layer_key in self.LAYER_KEYS
-        }
-        ratios = {}
-        for k, v in kwargs.items():
-            if k in kwarg_to_layer:
-                ratios[kwarg_to_layer[k]] = v
-            elif k in self.LAYER_KEYS:
-                ratios[k] = v
-
-        sd = vae.get_sd()
-        new_sd = {}
-        for tensor_key, tensor_val in sd.items():
-            scale = 1.0
-            matched_len = 0
-            for arg_name, arg_value in ratios.items():
-                if tensor_key.startswith(arg_name) and len(arg_name) > matched_len:
-                    scale = arg_value
-                    matched_len = len(arg_name)
-            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
-
-        new_vae = comfy.sd.VAE(sd=new_sd)
-        return (new_vae,)
-
-
-class VAEScaleFlux2Block:
-    """
-    FLUX2 VAEの特定の層をスケーリングするノード
-    scale=1.0 でそのまま、scale=0.0 で完全に抑制
-
-    get_sd() はComfyUI内部のldm形式キーを返す（SDXLと同様）:
-      encoder.down_blocks.N.*          -> encoder.down.N.*
-      encoder.mid_block.resnets.0.*    -> encoder.mid.block_1.*
-      encoder.mid_block.resnets.1.*    -> encoder.mid.block_2.*
-      encoder.mid_block.attentions.0.* -> encoder.mid.attn_1.*
-      encoder.conv_norm_out.*          -> encoder.norm_out.*
-      decoder.up_blocks.N.*            -> decoder.up.N.*
-      decoder.mid_block.resnets.0.*    -> decoder.mid.block_1.*
-      decoder.mid_block.resnets.1.*    -> decoder.mid.block_2.*
-      decoder.mid_block.attentions.0.* -> decoder.mid.attn_1.*
-      decoder.conv_norm_out.*          -> decoder.norm_out.*
-
-    注意: bn.* テンソル（I64）はスケーリング対象外
-    """
-
-    LAYER_KEYS = [
-        # Quantization
-        "quant_conv",
-        "post_quant_conv",
-        # Encoder
-        "encoder.conv_in",
-        "encoder.conv_out",
-        "encoder.norm_out",
-        *[f"encoder.down.{i}." for i in range(4)],
-        "encoder.mid.attn_1.",
-        "encoder.mid.block_1.",
-        "encoder.mid.block_2.",
-        # Decoder
-        "decoder.conv_in",
-        "decoder.conv_out",
-        "decoder.norm_out",
-        "decoder.mid.attn_1.",
-        "decoder.mid.block_1.",
-        "decoder.mid.block_2.",
-        *[f"decoder.up.{i}." for i in range(4)],
-    ]
-
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"vae": ("VAE",)}
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-        for key in s.LAYER_KEYS:
-            arg_dict[key] = argument
-        return {"required": arg_dict}
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = "Scale specific layers of FLUX2 VAE. Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
-
-    # I64など浮動小数点演算できないdtypeを除外
-    _SKIP_DTYPES = {torch.int32, torch.int64, torch.bool}
-
-    def scale(self, vae, **kwargs):
-        # ComfyUI が "." を "_" に変換する場合に備えて逆引きテーブルを作成
-        kwarg_to_layer = {
-            layer_key.replace(".", "_"): layer_key
-            for layer_key in self.LAYER_KEYS
-        }
-        ratios = {}
-        for k, v in kwargs.items():
-            if k in kwarg_to_layer:
-                ratios[kwarg_to_layer[k]] = v
-            elif k in self.LAYER_KEYS:
-                ratios[k] = v
-
-        sd = vae.get_sd()
-        new_sd = {}
-        for tensor_key, tensor_val in sd.items():
-            # I64 等の整数テンソルはスケーリング不可のためそのままコピー
-            if tensor_val.dtype in self._SKIP_DTYPES:
-                new_sd[tensor_key] = tensor_val
-                continue
-
-            scale = 1.0
-            matched_len = 0
-            for arg_name, arg_value in ratios.items():
-                if tensor_key.startswith(arg_name) and len(arg_name) > matched_len:
-                    scale = arg_value
-                    matched_len = len(arg_name)
-
-            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
-
-        new_vae = comfy.sd.VAE(sd=new_sd)
-        return (new_vae,)
-
-
-class VAEScaleQwenBlock:
-    """
-    Qwen-Image VAEの特定の層をスケーリングするノード
-    scale=1.0 でそのまま、scale=0.0 で完全に抑制
- 
-    対象キー構造（本ノードで参照する get_sd() のキー例）:
-      conv1.*
-      conv2.*
-      encoder.conv1.*
-      encoder.downsamples.N.*      (N=0..10)
-      encoder.middle.0.*           (residual block)
-      encoder.middle.1.*           (attention block)
-      encoder.middle.2.*           (residual block)
-      encoder.head.*
-      decoder.conv1.*
-      decoder.upsamples.N.*        (N=0..14)
-      decoder.middle.0.*           (residual block)
-      decoder.middle.1.*           (attention block)
-      decoder.middle.2.*           (residual block)
-      decoder.head.*
- 
-    downsamples / upsamples の内訳（キー一覧より判定）:
-      encoder.downsamples: 0,1,3,4,6,7,9,10 = residual block
-                            2,5,8           = resample (5,8 は time_conv も持つ)
-      decoder.upsamples:   0,1,2,4,5,6,8,9,10,12,13,14 = residual block
-                            3,7,11                       = resample (3,7 は time_conv も持つ)
-    """
- 
-    LAYER_KEYS = [
-        # Top-level conv (post-quant / pre-quant 相当)
-        "conv1",
-        "conv2",
-        # Encoder
-        "encoder.conv1",
-        *[f"encoder.downsamples.{i}." for i in range(11)],
-        "encoder.middle.0.",  # residual
-        "encoder.middle.1.",  # attention
-        "encoder.middle.2.",  # residual
-        "encoder.head.",
-        # Decoder
-        "decoder.conv1",
-        "decoder.middle.0.",  # residual
-        "decoder.middle.1.",  # attention
-        "decoder.middle.2.",  # residual
-        *[f"decoder.upsamples.{i}." for i in range(15)],
-        "decoder.head.",
-    ]
- 
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"vae": ("VAE",)}
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-        for key in s.LAYER_KEYS:
-            arg_dict[key] = argument
-        return {"required": arg_dict}
- 
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = (
-        "Scale specific layers of the Qwen-Image VAE. "
-        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer."
-    )
- 
-    def scale(self, vae, **kwargs):
-        # ComfyUI が widget 名の "." を "_" に変換する場合があるため、
-        # kwargs のキーを LAYER_KEYS に復元する
-        kwarg_to_layer = {
-            layer_key.replace(".", "_"): layer_key
-            for layer_key in self.LAYER_KEYS
-        }
-        ratios = {}
-        for k, v in kwargs.items():
-            if k in kwarg_to_layer:
-                ratios[kwarg_to_layer[k]] = v
-            elif k in self.LAYER_KEYS:
-                ratios[k] = v
- 
-        # テンソルのスケーリング（最長一致したプレフィックスの scale を採用）
-        sd = vae.get_sd()
-        new_sd = {}
-        for tensor_key, tensor_val in sd.items():
-            scale = 1.0
-            matched_len = 0
-            for arg_name, arg_value in ratios.items():
-                if tensor_key.startswith(arg_name) and len(arg_name) > matched_len:
-                    scale = arg_value
-                    matched_len = len(arg_name)
-            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
- 
-        new_vae = comfy.sd.VAE(sd=new_sd)
-        return (new_vae,)
-
-
-class VAEScaleWanVideoBlock:
-    """
-    Wan2.1 VAE の特定の層をスケーリングするノード。
-    scale=1.0 でそのまま、scale=0.0 で完全に抑制。
- 
-    Wan2.1 VAE のキー構造:
-      - トップレベル: conv1, conv2 (エンコーダー/デコーダー接続用の変換層)
-      - encoder.conv1, encoder.head, encoder.middle.{0,1,2}
-      - encoder.downsamples.{0-10}
-      - decoder.conv1, decoder.head, decoder.middle.{0,1,2}
-      - decoder.upsamples.{0-14}
- 
-    ComfyUI が INPUT_TYPES のキーの "." を "_" に変換して
-    kwargs に渡すため、逆引きテーブルで復元する。
-    """
- 
-    LAYER_KEYS = [
-        # トップレベル変換層
-        "conv1.",
-        "conv2.",
-        # Encoder
-        "encoder.conv1.",
-        "encoder.head.",
-        "encoder.middle.",
-        "encoder.middle.0.",
-        "encoder.middle.1.",
-        "encoder.middle.2.",
-        *[f"encoder.downsamples.{i}." for i in range(11)],
-        # Decoder
-        "decoder.conv1.",
-        "decoder.head.",
-        "decoder.middle.",
-        "decoder.middle.0.",
-        "decoder.middle.1.",
-        "decoder.middle.2.",
-        *[f"decoder.upsamples.{i}." for i in range(15)],
-    ]
- 
-    @classmethod
-    def INPUT_TYPES(s):
-        arg_dict = {"vae": ("VAE",)}
-        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01})
-        for key in s.LAYER_KEYS:
-            arg_dict[key] = argument
-        return {"required": arg_dict}
- 
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "scale"
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = (
-        "Scale specific layers of the Wan2.1 VAE. "
-        "Scale=1.0 keeps original weights, Scale=0.0 zeroes out the layer."
-    )
- 
-    def scale(self, vae, **kwargs):
-        # ComfyUI が "." を "_" に変換する場合に備えて逆引きテーブルを作成
-        kwarg_to_layer = {
-            layer_key.replace(".", "_"): layer_key
-            for layer_key in self.LAYER_KEYS
-        }
- 
-        ratios = {}
-        for k, v in kwargs.items():
-            if k in kwarg_to_layer:
-                ratios[kwarg_to_layer[k]] = v
-            elif k in self.LAYER_KEYS:
-                ratios[k] = v
- 
-        sd = vae.get_sd()
-        new_sd = {}
- 
-        for tensor_key, tensor_val in sd.items():
-            scale = 1.0
-            matched_len = 0
-            # 最長一致でスケールを決定（より具体的なプレフィックスを優先）
-            for prefix, ratio in ratios.items():
-                if tensor_key.startswith(prefix) and len(prefix) > matched_len:
-                    scale = ratio
-                    matched_len = len(prefix)
- 
-            new_sd[tensor_key] = tensor_val * scale if scale != 1.0 else tensor_val
- 
-        new_vae = comfy.sd.VAE(sd=new_sd)
-        return (new_vae,)
-
-
-class CLIPSaveQwen:
-    def __init__(self):
-        self.output_dir = folder_paths.get_output_directory()
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "clip": ("CLIP",),
-                "filename_prefix": ("STRING", {"default": "qwen_2.5_vl_merged"}),
-            },
-            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
-        }
-
-    RETURN_TYPES = ()
-    FUNCTION = "save"
-    OUTPUT_NODE = True
-    CATEGORY = "advanced/model_merging/model_specific"
-    DESCRIPTION = "Saves Qwen-2.5-VL-7B CLIP models by stripping the internal 'qwen25_7b.transformer.' prefix."
-
-    def save(self, clip, filename_prefix, prompt=None, extra_pnginfo=None):
-        prompt_info = ""
-        if prompt is not None:
-            prompt_info = json.dumps(prompt)
-
+    def execute(cls, clip, filename_prefix: str) -> io.NodeOutput:
         metadata = {}
         if not args.disable_metadata:
             metadata["format"] = "pt"
-            metadata["prompt"] = prompt_info
-            if extra_pnginfo is not None:
-                for x in extra_pnginfo:
-                    metadata[x] = json.dumps(extra_pnginfo[x])
+            metadata["prompt"] = json.dumps(cls.hidden.prompt) if cls.hidden.prompt is not None else ""
+            if cls.hidden.extra_pnginfo is not None:
+                for k, v in cls.hidden.extra_pnginfo.items():
+                    metadata[k] = json.dumps(v)
 
-        clip_sd = clip.get_sd()
+        strip_prefix = "qwen25_7b.transformer."
         output_sd = {}
-
-        # "qwen25_7b.transformer." プレフィックスを削除
-        prefix_to_strip = "qwen25_7b.transformer."
-
-        for k, v in clip_sd.items():
-            if k.startswith(prefix_to_strip):
-                new_key = k[len(prefix_to_strip):]
-                output_sd[new_key] = v
-            elif k.startswith("qwen25_7b."):
-                new_key = k.replace("qwen25_7b.", "")
-                output_sd[new_key] = v
+        for key, value in clip.get_sd().items():
+            if key.startswith(strip_prefix):
+                output_sd[key[len(strip_prefix):]] = value
+            elif key.startswith("qwen25_7b."):
+                output_sd[key.replace("qwen25_7b.", "")] = value
             else:
-                output_sd[k] = v
+                output_sd[key] = value
 
-        full_output_folder, filename, counter, subfolder, filename_prefix = (
-            folder_paths.get_save_image_path(filename_prefix, self.output_dir)
+        output_dir = folder_paths.get_output_directory()
+        full_folder, filename, counter, _subfolder, _prefix = folder_paths.get_save_image_path(
+            filename_prefix, output_dir
+        )
+        output_path = os.path.join(full_folder, f"{filename}_{counter:05}_.safetensors")
+        comfy.utils.save_torch_file(output_sd, output_path, metadata=metadata)
+
+        return io.NodeOutput()
+
+
+# ------------------------------------------------------------------------------
+# Node: VAE Merge Simple
+# ------------------------------------------------------------------------------
+
+class VAEMergeSimple(io.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEMergeSimple",
+            display_name="VAE Merge Simple",
+            category="advanced/model_merging",
+            inputs=[
+                io.Vae.Input("vae1"),
+                io.Vae.Input("vae2"),
+                io.Float.Input("ratio", **_RATIO_ARG),
+            ],
+            outputs=single_output(io.Vae),
         )
 
-        output_checkpoint = f"{filename}_{counter:05}_.safetensors"
-        output_checkpoint = os.path.join(full_output_folder, output_checkpoint)
-
-        comfy.utils.save_torch_file(output_sd, output_checkpoint, metadata=metadata)
-
-        return {}
+    @classmethod
+    def execute(cls, vae1, vae2, ratio: float) -> io.NodeOutput:
+        return io.NodeOutput(merge_vae_sd(vae1, vae2, ratios={}, default_ratio=ratio))
 
 
-# ---- ノード登録用マッピング ----
+# ------------------------------------------------------------------------------
+# Node: VAE Merge Subtract
+# ------------------------------------------------------------------------------
 
-NODE_CLASS_MAPPINGS = {
-    "KeyNameInspector": KeyNameInspector,
-    "ModelScaleSDXL": ModelScaleSDXL,
-    "ModelMergeHiDream": ModelMergeHiDream,
-    "ModelScaleHiDream": ModelScaleHiDream,
-    "ModelScaleQwenImage": ModelScaleQwenImage,
-    "ModelMergeZImage": ModelMergeZImage,
-    "ModelScaleZImage": ModelScaleZImage,
-    "ModelScaleKrea2": ModelScaleKrea2,
-    "ModelScaleFlux2Klein": ModelScaleFlux2Klein,
-    "ModelScaleErnieImage": ModelScaleErnieImage,
-    "ModelScaleHiDreamO1Image": ModelScaleHiDreamO1Image,
-    "CLIPScaleDualSDXLBlock": CLIPScaleDualSDXLBlock,
-    "CLIPScaleQwenBlock": CLIPScaleQwenBlock,
-    "CLIPSaveQwen": CLIPSaveQwen,
-    "VAEMergeSimple": VAEMergeSimple,
-    "VAEMergeSubtract": VAEMergeSubtract,
-    "VAEMergeAdd": VAEMergeAdd,
-    "VAEScaleSDXLBlock": VAEScaleSDXLBlock,
-    "VAEMergeSDXLBlock": VAEMergeSDXLBlock,
-    "VAEScaleFluxBlock": VAEScaleFluxBlock,
-    "VAEScaleFlux2Block": VAEScaleFlux2Block,
-    "VAEScaleQwenBlock": VAEScaleQwenBlock,
-    "VAEScaleWanVideo": VAEScaleWanVideoBlock,
-}
+class VAEMergeSubtract(io.ComfyNode):
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "KeyNameInspector": "Key Name Inspector",
-    "ModelScaleSDXL": "Model Scale SDXL",
-    "ModelMergeHiDream": "Model Merge HiDream",
-    "ModelScaleHiDream": "Model Scale HiDream",
-    "ModelScaleQwenImage": "Model Scale Qwen Image",
-    "ModelMergeZImage": "Model Merge Z-Image",
-    "ModelScaleZImage": "Model Scale Z-Image",
-    "ModelScaleKrea2": "Model Scale Krea2",
-    "ModelScaleFlux2Klein": "Model Scale Flux2 Klein",
-    "ModelScaleErnieImage": "Model Scale ERNIE Image",
-    "ModelScaleHiDreamO1Image": "Model Scale HiDream-O1-Image",
-    "CLIPScaleDualSDXLBlock": "CLIP Scale Dual SDXL Block",
-    "CLIPScaleQwenBlock": "CLIP Scale Qwen Block",
-    "CLIPSaveQwen": "CLIP Save Qwen",
-    "VAEMergeSimple": "VAE Merge Simple",
-    "VAEMergeSubtract": "VAE Merge Subtract",
-    "VAEMergeAdd": "VAE Merge Add",
-    "VAEScaleSDXLBlock": "VAE Scale SDXL Block",
-    "VAEMergeSDXLBlock": "VAE Merge SDXL Block",
-    "VAEScaleFluxBlock": "VAE Scale FLUX Block",
-    "VAEScaleFlux2Block": "VAE Scale FLUX2 Block",
-    "VAEScaleQwenBlock": "VAE Scale Qwen Block",
-    "VAEScaleWanVideo": "VAE Scale Wan Video",
-}
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEMergeSubtract",
+            display_name="VAE Merge Subtract",
+            category="advanced/model_merging",
+            inputs=[
+                io.Vae.Input("vae1"),
+                io.Vae.Input("vae2"),
+                io.Float.Input("multiplier", default=1.0, min=-10.0, max=10.0, step=0.01),
+            ],
+            outputs=single_output(io.Vae),
+        )
+
+    @classmethod
+    def execute(cls, vae1, vae2, multiplier: float) -> io.NodeOutput:
+        sd1, sd2 = vae1.get_sd(), vae2.get_sd()
+        merged_sd = {
+            key: (tensor - multiplier * sd2[key]) if key in sd2 else tensor
+            for key, tensor in sd1.items()
+        }
+        return io.NodeOutput(comfy.sd.VAE(sd=merged_sd))
+
+
+# ------------------------------------------------------------------------------
+# Node: VAE Merge Add
+# ------------------------------------------------------------------------------
+
+class VAEMergeAdd(io.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEMergeAdd",
+            display_name="VAE Merge Add",
+            category="advanced/model_merging",
+            inputs=[
+                io.Vae.Input("vae1"),
+                io.Vae.Input("vae2"),
+            ],
+            outputs=single_output(io.Vae),
+        )
+
+    @classmethod
+    def execute(cls, vae1, vae2) -> io.NodeOutput:
+        sd1, sd2 = vae1.get_sd(), vae2.get_sd()
+        merged_sd = {
+            key: (tensor + sd2[key]) if key in sd2 else tensor
+            for key, tensor in sd1.items()
+        }
+        return io.NodeOutput(comfy.sd.VAE(sd=merged_sd))
+
+
+# ------------------------------------------------------------------------------
+# Node: VAE Scale SDXL Block
+# ------------------------------------------------------------------------------
+
+class VAEScaleSDXLBlock(io.ComfyNode):
+    """Scale SDXL VAE layers. scale=1.0 keeps original, scale=0.0 zeroes out.
+
+    get_sd() returns ComfyUI's internal ldm-style keys:
+      encoder.down_blocks.N.resnets.M.* -> encoder.down.N.block.M.*
+      encoder.mid_block.resnets.{0,1}.* -> encoder.mid.block_{1,2}.*
+      encoder.mid_block.attentions.0.*  -> encoder.mid.attn_1.*
+      (decoder mirrors the same remapping)
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEScaleSDXLBlock",
+            display_name="VAE Scale SDXL Block",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of SDXL VAE. "
+                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_VAE_SDXL_LAYER_KEYS, "vae", io.Vae),
+            outputs=single_output(io.Vae),
+        )
+
+    @classmethod
+    def execute(cls, vae, **kwargs) -> io.NodeOutput:
+        ratios = restore_layer_keys(kwargs, _VAE_SDXL_LAYER_KEYS)
+        return io.NodeOutput(scale_vae_sd(vae, ratios))
+
+
+# ------------------------------------------------------------------------------
+# Node: VAE Merge SDXL Block
+# ------------------------------------------------------------------------------
+
+class VAEMergeSDXLBlock(io.ComfyNode):
+    """Block-wise merge for two SDXL VAEs. ratio=0.0 keeps vae1, ratio=1.0 uses vae2."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEMergeSDXLBlock",
+            display_name="VAE Merge SDXL Block",
+            category="advanced/model_merging/model_specific",
+            description="Block-wise merging for SDXL VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2.",
+            inputs=[
+                io.Vae.Input("vae1"),
+                io.Vae.Input("vae2"),
+                *[io.Float.Input(key, default=0.5, min=0.0, max=1.0, step=0.01)
+                  for key in _VAE_SDXL_LAYER_KEYS],
+            ],
+            outputs=single_output(io.Vae),
+        )
+
+    @classmethod
+    def execute(cls, vae1, vae2, **kwargs) -> io.NodeOutput:
+        ratios = restore_layer_keys(kwargs, _VAE_SDXL_LAYER_KEYS)
+        return io.NodeOutput(merge_vae_sd(vae1, vae2, ratios))
+
+
+# ------------------------------------------------------------------------------
+# Node: VAE Scale FLUX Block
+# ------------------------------------------------------------------------------
+
+class VAEScaleFluxBlock(io.ComfyNode):
+    """Scale FLUX1 VAE layers. FLUX1's get_sd() already uses ldm-style keys directly."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEScaleFluxBlock",
+            display_name="VAE Scale FLUX Block",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of FLUX1 VAE. "
+                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_VAE_FLUX_LAYER_KEYS, "vae", io.Vae),
+            outputs=single_output(io.Vae),
+        )
+
+    @classmethod
+    def execute(cls, vae, **kwargs) -> io.NodeOutput:
+        ratios = restore_layer_keys(kwargs, _VAE_FLUX_LAYER_KEYS)
+        return io.NodeOutput(scale_vae_sd(vae, ratios))
+
+
+# ------------------------------------------------------------------------------
+# Node: VAE Scale FLUX2 Block
+# ------------------------------------------------------------------------------
+
+class VAEScaleFlux2Block(io.ComfyNode):
+    """Scale FLUX2 VAE layers. Integer/bool tensors (e.g. buffer counters) are left untouched."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEScaleFlux2Block",
+            display_name="VAE Scale FLUX2 Block",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of FLUX2 VAE. "
+                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_VAE_FLUX2_LAYER_KEYS, "vae", io.Vae),
+            outputs=single_output(io.Vae),
+        )
+
+    @classmethod
+    def execute(cls, vae, **kwargs) -> io.NodeOutput:
+        ratios = restore_layer_keys(kwargs, _VAE_FLUX2_LAYER_KEYS)
+        return io.NodeOutput(scale_vae_sd(vae, ratios, skip_dtypes=_VAE_FLUX2_SKIP_DTYPES))
+
+
+# ------------------------------------------------------------------------------
+# Node: VAE Scale Qwen Block
+# ------------------------------------------------------------------------------
+
+class VAEScaleQwenBlock(io.ComfyNode):
+    """Scale Qwen-Image VAE layers."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEScaleQwenBlock",
+            display_name="VAE Scale Qwen Block",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of the Qwen-Image VAE. "
+                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_VAE_QWEN_LAYER_KEYS, "vae", io.Vae),
+            outputs=single_output(io.Vae),
+        )
+
+    @classmethod
+    def execute(cls, vae, **kwargs) -> io.NodeOutput:
+        ratios = restore_layer_keys(kwargs, _VAE_QWEN_LAYER_KEYS)
+        return io.NodeOutput(scale_vae_sd(vae, ratios))
+
+
+# ------------------------------------------------------------------------------
+# Node: VAE Scale Wan Video
+# ------------------------------------------------------------------------------
+
+class VAEScaleWanVideoBlock(io.ComfyNode):
+    """Scale Wan2.1 VAE layers."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_VAEScaleWanVideo",
+            display_name="VAE Scale Wan Video",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of the Wan2.1 VAE. "
+                        "Scale=1.0 keeps original weights, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_VAE_WAN_VIDEO_LAYER_KEYS, "vae", io.Vae),
+            outputs=single_output(io.Vae),
+        )
+
+    @classmethod
+    def execute(cls, vae, **kwargs) -> io.NodeOutput:
+        ratios = restore_layer_keys(kwargs, _VAE_WAN_VIDEO_LAYER_KEYS)
+        return io.NodeOutput(scale_vae_sd(vae, ratios))
+
+
+# ------------------------------------------------------------------------------
+# Extension registration
+# ------------------------------------------------------------------------------
+
+NODE_LIST = [
+    KeyNameInspector,
+    ModelScaleSDXL,
+    ModelMergeHiDream,
+    ModelScaleHiDream,
+    ModelScaleQwenImage,
+    ModelMergeZImage,
+    ModelScaleZImage,
+    ModelScaleKrea2,
+    ModelScaleFlux2Klein,
+    ModelScaleErnieImage,
+    ModelScaleHiDreamO1Image,
+    CLIPScaleDualSDXLBlock,
+    CLIPScaleQwenBlock,
+    CLIPSaveQwen,
+    VAEMergeSimple,
+    VAEMergeSubtract,
+    VAEMergeAdd,
+    VAEScaleSDXLBlock,
+    VAEMergeSDXLBlock,
+    VAEScaleFluxBlock,
+    VAEScaleFlux2Block,
+    VAEScaleQwenBlock,
+    VAEScaleWanVideoBlock,
+]
+
+
+class MergeNodesExtension(ComfyExtension):
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
+        return NODE_LIST
+
+
+async def comfy_entrypoint() -> MergeNodesExtension:
+    return MergeNodesExtension()

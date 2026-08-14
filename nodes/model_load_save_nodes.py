@@ -1,169 +1,177 @@
 import re
 import os
+
 import torch
 import comfy.sd
 import folder_paths
-
 from safetensors.torch import load_file, save_file
+from safetensors import safe_open
+
+from comfy_api.latest import io
+
+# ------------------------------------------------------------------------------
+# Shared helpers
+# ------------------------------------------------------------------------------
+
+# Precision/format keywords stripped from checkpoint filenames.
+_NAME_CLEAN_KEYWORDS = (
+    "fp32", "fp16", "bf16", "fp8",
+    "svd", "scaled", "mxfp8", "nvfp4",
+    "int8", "convrot", "hq",
+    "e4m3fn", "e4m3", "e5m2fn", "e5m2",
+)
+_NAME_CLEAN_PATTERN = r'(?:' + '|'.join(_NAME_CLEAN_KEYWORDS) + r')'
 
 
-def clean_ckpt_name(ckpt_name):
-    """ckpt_name(ファイル名)から拡張子・精度/形式系のキーワードを除去し、
-    末尾に残った '-' や '_' も取り除いた文字列を返す。"""
-
-    name = ckpt_name
-
-    # 拡張子の除去（.safetensors, .pt, .pth）
-    name = re.sub(r'\.(safetensors|pt|pth)', '', name, flags=re.IGNORECASE)
-
-    # 精度・形式系キーワードの除去
-    keywords = [
-        "fp32", "fp16", "bf16", "fp8",
-        "svd", "scaled", "mxfp8", "nvfp4",
-        "int8", "convrot", "hq",
-        "e4m3fn", "e4m3", "e5m2fn", "e5m2",
-    ]
-    pattern = r'(?:' + '|'.join(keywords) + r')'
-    name = re.sub(pattern, '', name, flags=re.IGNORECASE)
-
-    # 文末に残った '-' や '_' の除去（複数連続もまとめて除去）
+def clean_ckpt_name(ckpt_name: str) -> str:
+    """Strip extension, precision/format keywords, and trailing '-'/'_' from a checkpoint filename."""
+    name = re.sub(r'\.(safetensors|pt|pth)', '', ckpt_name, flags=re.IGNORECASE)
+    name = re.sub(_NAME_CLEAN_PATTERN, '', name, flags=re.IGNORECASE)
     name = re.sub(r'[-_]+$', '', name)
-
     return name
 
 
-def get_combined_model_list():
-    """checkpoints と diffusion_models 両方のフォルダからファイル名一覧を取得し、
-    重複を除いてソートしたリストを返す。"""
+def get_combined_model_list() -> list[str]:
+    """Return the sorted union of filenames in 'checkpoints' and 'diffusion_models'."""
     ckpt_list = folder_paths.get_filename_list("checkpoints")
     unet_list = folder_paths.get_filename_list("diffusion_models")
-    combined = sorted(set(ckpt_list) | set(unet_list))
-    return combined
+    return sorted(set(ckpt_list) | set(unet_list))
 
 
-def get_model_full_path(model_name):
-    """model_name が checkpoints / diffusion_models のどちらのフォルダに
-    存在するかを調べ、(folder_type, full_path) を返す。"""
-    ckpt_list = folder_paths.get_filename_list("checkpoints")
-    if model_name in ckpt_list:
-        return "checkpoints", folder_paths.get_full_path_or_raise("checkpoints", model_name)
-
-    unet_list = folder_paths.get_filename_list("diffusion_models")
-    if model_name in unet_list:
-        return "diffusion_models", folder_paths.get_full_path_or_raise("diffusion_models", model_name)
-
+def get_model_full_path(model_name: str) -> str:
+    """Resolve model_name against 'checkpoints' then 'diffusion_models'."""
+    if model_name in folder_paths.get_filename_list("checkpoints"):
+        return folder_paths.get_full_path_or_raise("checkpoints", model_name)
+    if model_name in folder_paths.get_filename_list("diffusion_models"):
+        return folder_paths.get_full_path_or_raise("diffusion_models", model_name)
     raise FileNotFoundError(f"Model '{model_name}' not found in 'checkpoints' or 'diffusion_models' folders.")
 
 
-class LoadCheckpointWithName:
+# ------------------------------------------------------------------------------
+# Node: Load Checkpoint (with Name)
+# ------------------------------------------------------------------------------
+
+class LoadCheckpointWithName(io.ComfyNode):
+
+    NODE_ID_LEGACY = "LoadCheckpointWithName"
+    NODE_ID_INPUT_ORDER = ("model_name",)
+
     @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model_name": (get_combined_model_list(), {"tooltip": "The name of the checkpoint (model) to load. Searches both 'checkpoints' and 'diffusion_models' folders."}),
-            }
-        }
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "STRING")
-    RETURN_NAMES = ("MODEL", "CLIP", "VAE", "model_name")
-    OUTPUT_TOOLTIPS = (
-        "The model used for denoising latents.",
-        "The CLIP model used for encoding text prompts.",
-        "The VAE model used for encoding and decoding images to and from latent space.",
-        "Cleaned model name (extension and precision/format keywords removed).",
-    )
-    FUNCTION = "load_checkpoint"
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_LoadCheckpointWithNameClean",
+            display_name="Load Checkpoint (with Name Clean)",
+            category="model/loaders",
+            description="Loads a diffusion model checkpoint (from 'checkpoints' or 'diffusion_models' "
+                         "folders) and also outputs a cleaned name string.",
+            search_aliases=["load model", "checkpoint", "model loader", "load checkpoint", "ckpt", "model"],
+            inputs=[
+                io.Combo.Input(
+                    "model_name",
+                    options=get_combined_model_list(),
+                    tooltip="The name of the checkpoint (model) to load. "
+                            "Searches both 'checkpoints' and 'diffusion_models' folders.",
+                ),
+            ],
+            outputs=[
+                io.Model.Output(display_name="MODEL", tooltip="The model used for denoising latents."),
+                io.Clip.Output(display_name="CLIP", tooltip="The CLIP model used for encoding text prompts."),
+                io.Vae.Output(
+                    display_name="VAE",
+                    tooltip="The VAE model used for encoding and decoding images to and from latent space.",
+                ),
+                io.String.Output(
+                    display_name="model_name_clean",
+                    tooltip="Cleaned model name (extension and precision/format keywords removed).",
+                ),
+            ],
+        )
 
-    CATEGORY = "model/loaders"
-    DESCRIPTION = "Loads a diffusion model checkpoint (from 'checkpoints' or 'diffusion_models' folders) and also outputs a cleaned name string."
-    SEARCH_ALIASES = ["load model", "checkpoint", "model loader", "load checkpoint", "ckpt", "model"]
-
-    def load_checkpoint(self, model_name):
-        folder_type, ckpt_path = get_model_full_path(model_name)
-        out = comfy.sd.load_checkpoint_guess_config(
+    @classmethod
+    def execute(cls, model_name: str) -> io.NodeOutput:
+        ckpt_path = get_model_full_path(model_name)
+        model, clip, vae, _ = comfy.sd.load_checkpoint_guess_config(
             ckpt_path,
             output_vae=True,
             output_clip=True,
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
         )
-        cleaned_name = clean_ckpt_name(model_name)
-        return out[:3] + (cleaned_name,)
+        return io.NodeOutput(model, clip, vae, clean_ckpt_name(model_name))
 
 
-class LoadDiffusionModelWithName:
+# ------------------------------------------------------------------------------
+# Node: Load Diffusion Model (with Name)
+# ------------------------------------------------------------------------------
+
+_WEIGHT_DTYPE_MAP = {
+    "fp8_e4m3fn": {"dtype": torch.float8_e4m3fn},
+    "fp8_e4m3fn_fast": {"dtype": torch.float8_e4m3fn, "fp8_optimizations": True},
+    "fp8_e5m2": {"dtype": torch.float8_e5m2},
+}
+
+
+class LoadDiffusionModelWithName(io.ComfyNode):
+
+    NODE_ID_LEGACY = "LoadDiffusionModelWithName"
+    NODE_ID_INPUT_ORDER = ("model_name", "weight_dtype")
+
     @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model_name": (get_combined_model_list(), {"tooltip": "The name of the diffusion model (UNET) to load. Searches both 'checkpoints' and 'diffusion_models' folders."}),
-                "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"], {"advanced": True})
-            }
-        }
-    RETURN_TYPES = ("MODEL", "STRING")
-    RETURN_NAMES = ("MODEL", "model_name")
-    FUNCTION = "load_unet"
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_LoadDiffusionModelWithNameClean",
+            display_name="Load Diffusion Model (with Name Clean)",
+            category="model/loaders",
+            description="Loads a diffusion model (UNET) from 'checkpoints' or 'diffusion_models' "
+                         "folders and also outputs a cleaned name string.",
+            inputs=[
+                io.Combo.Input(
+                    "model_name",
+                    options=get_combined_model_list(),
+                    tooltip="The name of the diffusion model (UNET) to load. "
+                            "Searches both 'checkpoints' and 'diffusion_models' folders.",
+                ),
+                io.Combo.Input(
+                    "weight_dtype",
+                    options=["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"],
+                    advanced=True,
+                ),
+            ],
+            outputs=[
+                io.Model.Output(display_name="MODEL"),
+                io.String.Output(display_name="model_name_clean"),
+            ],
+        )
 
-    CATEGORY = "model/loaders"
-    DESCRIPTION = "Loads a diffusion model (UNET) from 'checkpoints' or 'diffusion_models' folders and also outputs a cleaned name string."
-
-    def load_unet(self, model_name, weight_dtype):
-        model_options = {}
-        if weight_dtype == "fp8_e4m3fn":
-            model_options["dtype"] = torch.float8_e4m3fn
-        elif weight_dtype == "fp8_e4m3fn_fast":
-            model_options["dtype"] = torch.float8_e4m3fn
-            model_options["fp8_optimizations"] = True
-        elif weight_dtype == "fp8_e5m2":
-            model_options["dtype"] = torch.float8_e5m2
-
-        folder_type, unet_path = get_model_full_path(model_name)
+    @classmethod
+    def execute(cls, model_name: str, weight_dtype: str) -> io.NodeOutput:
+        model_options = _WEIGHT_DTYPE_MAP.get(weight_dtype, {})
+        unet_path = get_model_full_path(model_name)
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
-        cleaned_name = clean_ckpt_name(model_name)
-        return (model, cleaned_name)
-
-
-"""
-Load Original Model / Model Save with Original
-===============================================
-ComfyUI でモデルを加工・保存する際に生じる 2 つの問題を解決するノード群。
-
-Problem 1 — Key prefix mismatch
-  ComfyUI は safetensors をロードするとき、モデルアーキテクチャに応じて
-  state_dict のキーに独自のプレフィックスを付与することがある。
-  その結果、元ファイルのキー名と ComfyUI 内部のキー名が一致しなくなる。
-
-  例:
-    safetensors のキー : "backbone.layer.0.weight"
-    ComfyUI state_dict : "diffusion_model.backbone.layer.0.weight"
-
-  対処: 両側のキー集合に対してドット区切りのプレフィックス候補を列挙し、
-        総当たりでマッチ数が最大になる組み合わせを自動選択する。
-
-Problem 2 — Missing tensors
-  ComfyUI の ModelSave は、ロード時に使用しなかったテンソルを
-  state_dict に含めないため、一部テンソルが消失することがある。
-
-  対処: 元ファイルの全テンソルを "original_model" として保持し、
-        保存時に ComfyUI の state_dict にないテンソルを補完する。
-
-Nodes:
-  LoadOriginalModel     — safetensors を生読みして original_model と model を出力
-  ModelSaveWithOriginal — 調整済み model と original_model を合成して保存
-"""
-
-# ------------------------------------------------------------------------------
-# Type alias
-# original_model は {"tensors": dict[str, Tensor], "metadata": dict} の辞書
-# ------------------------------------------------------------------------------
-
-ORIGINAL_MODEL_TYPE = "ORIGINAL_MODEL"
+        return io.NodeOutput(model, clean_ckpt_name(model_name))
 
 
 # ------------------------------------------------------------------------------
-# Utilities — prefix-agnostic key matching
+# Load Original Model / Model Save with Original
+#
+# Solves two problems that arise when editing and re-saving a ComfyUI model:
+#
+#   1. Key prefix mismatch — ComfyUI may prepend an internal prefix (e.g.
+#      "diffusion_model.") to state_dict keys, so they no longer match the
+#      original safetensors file's key names. Resolved by brute-forcing
+#      dot-separated prefix candidates on both sides and picking the pair
+#      with the most matching keys.
+#
+#   2. Missing tensors — ComfyUI's state_dict only contains tensors it
+#      actually used, so some may be dropped on save. Resolved by keeping
+#      the full original tensor set and filling in whatever is missing
+#      from ComfyUI's state_dict at save time.
 # ------------------------------------------------------------------------------
+
+ORIGINAL_MODEL_TYPE = io.Custom("ORIGINAL_MODEL")
+
 
 def _collect_prefix_candidates(keys: list[str]) -> list[str]:
-    """キー集合からドット区切りのプレフィックス候補を列挙する。空文字列を常に含む。"""
+    """Enumerate dot-separated prefix candidates from a key set (always includes "")."""
     candidates = {""}
     for key in keys:
         parts = key.split(".")
@@ -173,10 +181,7 @@ def _collect_prefix_candidates(keys: list[str]) -> list[str]:
 
 
 def _strip_prefix_from_keys(keys: list[str], prefix: str) -> dict[str, str]:
-    """
-    {正規化キー: 元キー} の辞書を返す。
-    prefix に一致しないキーは正規化キーとしてそのまま使用する。
-    """
+    """Return {normalized_key: original_key}; keys not matching prefix are left as-is."""
     result = {}
     for k in keys:
         norm = k[len(prefix):] if (prefix and k.startswith(prefix)) else k
@@ -189,31 +194,23 @@ def _find_best_prefix_pair(
     comfy_keys: list[str],
 ) -> tuple[str, str, dict[str, str], dict[str, str]]:
     """
-    両側のプレフィックス候補を総当たりし、正規化後のマッチ数が
-    最大になる (orig_prefix, comfy_prefix) の組み合わせを選択する。
+    Brute-force both sides' prefix candidates and return the (orig_prefix, comfy_prefix)
+    pair that maximizes the number of matching normalized keys.
 
     Returns:
-        orig_prefix  : ORIG 側で除去するプレフィックス
-        comfy_prefix : ComfyUI 側で除去するプレフィックス
-        orig_norm    : {正規化キー: ORIG 元キー}
-        comfy_norm   : {正規化キー: ComfyUI 元キー}
+        orig_prefix, comfy_prefix, orig_norm_map, comfy_norm_map
     """
     orig_candidates = _collect_prefix_candidates(orig_keys)
     comfy_candidates = _collect_prefix_candidates(comfy_keys)
 
-    # キャッシュで重複計算を避ける
     orig_cache: dict[str, dict[str, str]] = {}
     comfy_cache: dict[str, dict[str, str]] = {}
 
     def get_orig(pfx: str) -> dict[str, str]:
-        if pfx not in orig_cache:
-            orig_cache[pfx] = _strip_prefix_from_keys(orig_keys, pfx)
-        return orig_cache[pfx]
+        return orig_cache.setdefault(pfx, _strip_prefix_from_keys(orig_keys, pfx))
 
     def get_comfy(pfx: str) -> dict[str, str]:
-        if pfx not in comfy_cache:
-            comfy_cache[pfx] = _strip_prefix_from_keys(comfy_keys, pfx)
-        return comfy_cache[pfx]
+        return comfy_cache.setdefault(pfx, _strip_prefix_from_keys(comfy_keys, pfx))
 
     best_count = -1
     best_orig_pfx = ""
@@ -230,9 +227,7 @@ def _find_best_prefix_pair(
 
     print(
         f"[ModelSaveWithOriginal] prefix resolution: "
-        f"orig={repr(best_orig_pfx)}, "
-        f"comfy={repr(best_comfy_pfx)}, "
-        f"matched_keys={best_count}"
+        f"orig={repr(best_orig_pfx)}, comfy={repr(best_comfy_pfx)}, matched_keys={best_count}"
     )
 
     return best_orig_pfx, best_comfy_pfx, get_orig(best_orig_pfx), get_comfy(best_comfy_pfx)
@@ -242,37 +237,34 @@ def _find_best_prefix_pair(
 # Node: Load Original Model
 # ------------------------------------------------------------------------------
 
-class LoadOriginalModel:
-    """
-    safetensors ファイルを生のまま読み込み、2 種類の出力を提供する。
-
-    outputs:
-      original_model : ORIGINAL_MODEL — 全テンソルと元キー名を保持した辞書
-      model          : MODEL          — 通常の ComfyUI MODEL（UNETLoader 相当）
-    """
+class LoadOriginalModel(io.ComfyNode):
+    """Reads a safetensors file raw, exposing both the original tensor set
+    (original_model) and a normally-loaded ComfyUI MODEL."""
 
     @classmethod
-    def INPUT_TYPES(cls):
+    def define_schema(cls) -> io.Schema:
         unet_names = folder_paths.get_filename_list("diffusion_models")
         ckpt_names = folder_paths.get_filename_list("checkpoints")
-        all_names = sorted(set(unet_names + ckpt_names))
-        return {
-            "required": {
-                "unet_name": (all_names,),
-                "weight_dtype": (
-                    ["default", "fp32", "fp16", "bf16"],
-                    {"default": "default"},
+        return io.Schema(
+            node_id="EasygoingNodes_LoadOriginalModel",
+            display_name="Load Original Model",
+            category="loaders",
+            inputs=[
+                io.Combo.Input("unet_name", options=sorted(set(unet_names + ckpt_names))),
+                io.Combo.Input(
+                    "weight_dtype",
+                    options=["default", "fp32", "fp16", "bf16"],
+                    default="default",
                 ),
-            }
-        }
+            ],
+            outputs=[
+                ORIGINAL_MODEL_TYPE.Output(display_name="original_model"),
+                io.Model.Output(display_name="model"),
+            ],
+        )
 
-    RETURN_TYPES = (ORIGINAL_MODEL_TYPE, "MODEL")
-    RETURN_NAMES = ("original_model", "model")
-    FUNCTION = "load"
-    CATEGORY = "loaders"
-
-    def load(self, unet_name: str, weight_dtype: str):
-        # ファイルパス解決（diffusion_models → checkpoints の順にフォールバック）
+    @classmethod
+    def execute(cls, unet_name: str, weight_dtype: str) -> io.NodeOutput:
         path = folder_paths.get_full_path("diffusion_models", unet_name)
         if path is None:
             path = folder_paths.get_full_path("checkpoints", unet_name)
@@ -282,98 +274,73 @@ class LoadOriginalModel:
                 f"Place it in the diffusion_models or checkpoints folder."
             )
 
-        dtype_map = {
-            "fp32": torch.float32,
-            "fp16": torch.float16,
-            "bf16": torch.bfloat16,
-        }
-        load_dtype = dtype_map.get(weight_dtype, None)
+        dtype_map = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+        load_dtype = dtype_map.get(weight_dtype)
 
-        # safetensors を生読みして元キー名・全テンソルを保持する
+        # Raw-read to preserve original keys and every tensor.
         raw_sd = load_file(path, device="cpu")
         if load_dtype is not None:
             raw_sd = {k: v.to(load_dtype) for k, v in raw_sd.items()}
 
-        # __metadata__ を取得
         metadata = {}
         try:
-            from safetensors import safe_open
             with safe_open(path, framework="pt", device="cpu") as f:
                 metadata = dict(f.metadata()) if f.metadata() else {}
         except Exception:
             pass
 
-        original_model = {
-            "tensors": raw_sd,
-            "metadata": metadata,
-            "source_path": path,
-        }
+        original_model = {"tensors": raw_sd, "metadata": metadata, "source_path": path}
 
-        # 通常の ComfyUI MODEL をロード（UNETLoader と同等）
-        import comfy.sd
-
+        # Normal ComfyUI MODEL load (equivalent to UNETLoader).
         model_options = {}
         if weight_dtype == "fp16":
             model_options["dtype"] = torch.float16
         elif weight_dtype == "bf16":
             model_options["dtype"] = torch.bfloat16
-
         comfy_model = comfy.sd.load_diffusion_model(path, model_options=model_options)
 
-        return (original_model, comfy_model)
+        return io.NodeOutput(original_model, comfy_model)
 
 
 # ------------------------------------------------------------------------------
 # Node: Model Save with Original
 # ------------------------------------------------------------------------------
 
-class ModelSaveWithOriginal:
-    """
-    ComfyUI の調整済み model と original_model を合成して safetensors に保存する。
+class ModelSaveWithOriginal(io.ComfyNode):
+    """Merges an edited ComfyUI MODEL with its original_model and saves as safetensors.
 
-    処理フロー:
-      1. model から state_dict を取得する
-      2. 両側のキーに対してプレフィックス総当たりマッチングを実行する
-      3. マッチしたテンソルは ComfyUI の調整済み値で上書きする
-      4. マッチしなかったテンソル（消失テンソル）は original から復元する
-      5. 保存キー名は original_model の元キー名を使用する
-
-    inputs:
-      original_model : ORIGINAL_MODEL — LoadOriginalModel の出力
-      model          : MODEL          — 調整済み ComfyUI MODEL
-      filename_prefix: 保存ファイル名のプレフィックス
-      save_metadata  : True のとき original のメタデータを引き継ぐ
+    Flow: match keys between the two state_dicts via prefix search, take the
+    ComfyUI (edited) value for matched tensors, restore missing tensors from
+    the original, and save under the original file's key names.
     """
 
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "original_model": (ORIGINAL_MODEL_TYPE,),
-                "model": ("MODEL",),
-                "filename_prefix": ("STRING", {"default": "model_restored"}),
-            },
-            "optional": {
-                "save_metadata": ("BOOLEAN", {"default": True}),
-            },
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelSaveWithOriginal",
+            display_name="Model Save with Original",
+            category="model_merging",
+            is_output_node=True,
+            inputs=[
+                ORIGINAL_MODEL_TYPE.Input("original_model"),
+                io.Model.Input("model"),
+                io.String.Input("filename_prefix", default="model_restored"),
+                io.Boolean.Input("save_metadata", default=True, optional=True),
+            ],
+            outputs=[],
+        )
 
-    RETURN_TYPES = ()
-    FUNCTION = "save"
-    OUTPUT_NODE = True
-    CATEGORY = "model_merging"
-
-    def save(
-        self,
+    @classmethod
+    def execute(
+        cls,
         original_model: dict,
         model,
         filename_prefix: str,
         save_metadata: bool = True,
-    ):
+    ) -> io.NodeOutput:
         orig_tensors: dict[str, torch.Tensor] = original_model["tensors"]
         orig_metadata: dict = original_model.get("metadata", {})
 
-        # ComfyUI model から state_dict を取得
         try:
             comfy_sd: dict[str, torch.Tensor] = model.model.state_dict()
         except AttributeError:
@@ -385,38 +352,29 @@ class ModelSaveWithOriginal:
                     "Check that LoadOriginalModel is connected to ModelSaveWithOriginal."
                 )
 
-        # プレフィックス総当たりマッチング
         orig_keys = list(orig_tensors.keys())
         comfy_keys = list(comfy_sd.keys())
-
         _, _, orig_norm_map, comfy_norm_map = _find_best_prefix_pair(orig_keys, comfy_keys)
 
-        # 正規化キー → ComfyUI テンソル の逆引き辞書
         comfy_norm_tensors: dict[str, torch.Tensor] = {
-            norm_k: comfy_sd[orig_k]
-            for norm_k, orig_k in comfy_norm_map.items()
+            norm_k: comfy_sd[orig_k] for norm_k, orig_k in comfy_norm_map.items()
         }
 
-        # 合成: マッチしたテンソルは ComfyUI の値を採用し、消失テンソルは original から復元
+        # Merge: matched tensors take the edited value, missing ones are restored.
         output_sd: dict[str, torch.Tensor] = {}
         matched = 0
         restored = 0
-
         for norm_key, orig_key in orig_norm_map.items():
             if norm_key in comfy_norm_tensors:
-                output_sd[orig_key] = comfy_norm_tensors[norm_key].to(
-                    orig_tensors[orig_key].dtype
-                )
+                output_sd[orig_key] = comfy_norm_tensors[norm_key].to(orig_tensors[orig_key].dtype)
                 matched += 1
             else:
                 output_sd[orig_key] = orig_tensors[orig_key]
                 restored += 1
 
         comfy_only = set(comfy_norm_map.keys()) - set(orig_norm_map.keys())
-
         print(
-            f"[ModelSaveWithOriginal] "
-            f"matched={matched}, restored={restored}, "
+            f"[ModelSaveWithOriginal] matched={matched}, restored={restored}, "
             f"comfy_only(skipped)={len(comfy_only)}"
         )
         if comfy_only:
@@ -426,7 +384,7 @@ class ModelSaveWithOriginal:
                 + ("..." if len(comfy_only) > 10 else "")
             )
 
-        # 保存先パスの決定（連番で衝突回避）
+        # Resolve output path, avoiding collisions via a numeric suffix.
         output_dir = folder_paths.get_output_directory()
         base_dir = os.path.join(output_dir, os.path.dirname(filename_prefix))
         os.makedirs(base_dir, exist_ok=True)
@@ -441,7 +399,6 @@ class ModelSaveWithOriginal:
                 break
             counter += 1
 
-        # メタデータの構築
         save_meta: dict[str, str] | None = None
         if save_metadata:
             save_meta = {k: str(v) for k, v in orig_metadata.items()} if orig_metadata else {}
@@ -457,23 +414,12 @@ class ModelSaveWithOriginal:
             f"(orig: {len(orig_tensors)}, matched: {matched}, restored: {restored})"
         )
 
-        return {}
+        return io.NodeOutput()
 
 
-# ------------------------------------------------------------------------------
-# Registrations
-# ------------------------------------------------------------------------------
-
-NODE_CLASS_MAPPINGS = {
-    "LoadCheckpointWithName": LoadCheckpointWithName,
-    "LoadDiffusionModelWithName": LoadDiffusionModelWithName,
-    "LoadOriginalModel": LoadOriginalModel,
-    "ModelSaveWithOriginal": ModelSaveWithOriginal,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadCheckpointWithName": "Load Checkpoint (with Name)",
-    "LoadDiffusionModelWithName": "Load Diffusion Model (with Name)",
-    "LoadOriginalModel": "Load Original Model",
-    "ModelSaveWithOriginal": "Model Save with Original",
-}
+NODE_LIST = [
+    LoadCheckpointWithName,
+    LoadDiffusionModelWithName,
+    LoadOriginalModel,
+    ModelSaveWithOriginal,
+]

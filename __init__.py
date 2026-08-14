@@ -1,111 +1,60 @@
-import sys
-import os
-import importlib.util
-from pathlib import Path
-
-# カスタムノードのディレクトリを取得
-CUSTOM_NODE_DIR = Path(__file__).parent
-
-# 設定マネージャーをインポート
 try:
-    from .settings_manager import get_settings_manager
-    from .web_api import register_api_routes
-    SETTINGS_AVAILABLE = True
-except ImportError:
-    SETTINGS_AVAILABLE = False
+    from comfy_api.latest import ComfyAPI, ComfyExtension, io
+    from .nodes import NODE_LIST, RENAMED_NODES
 
-def replace_module_with_custom(module_path, custom_module_path):
-    """既存のモジュールをカスタムモジュールで置き換える"""
-    try:
-        spec = importlib.util.spec_from_file_location(module_path, custom_module_path)
-        custom_module = importlib.util.module_from_spec(spec)
-        sys.modules[module_path] = custom_module
-        spec.loader.exec_module(custom_module)
-        return True
-    except Exception:
-        return False
+    _comfy_api = ComfyAPI()
 
-def is_module_replacement_enabled(module_name):
-    """設定に基づいてモジュール置換が有効かどうかを確認"""
-    if not SETTINGS_AVAILABLE:
-        return True
+    class EasygoingNodesExtension(ComfyExtension):
+        async def on_load(self) -> None:
 
-    try:
-        settings_manager = get_settings_manager()
-        return settings_manager.is_module_enabled(module_name)
-    except Exception:
-        return True
+            for node_cls in RENAMED_NODES:
+                await _comfy_api.node_replacement.register(io.NodeReplace(
+                    new_node_id=node_cls.define_schema().node_id,
+                    old_node_id=node_cls.NODE_ID_LEGACY,
+                    old_widget_ids=list(node_cls.NODE_ID_INPUT_ORDER),
+                ))
 
-def apply_custom_modules():
-    """修正版モジュールを設定に基づいて適用（SDXL CLIPのみ）"""
-    # 修正版ファイルのパス
-    custom_sdxl_clip_path = CUSTOM_NODE_DIR / "modified_modules" / "sdxl_clip.py"
+        async def get_node_list(self):
+            return NODE_LIST
 
-    applied_modules = []
-    skipped_modules = []
+    async def comfy_entrypoint() -> EasygoingNodesExtension:
+        return EasygoingNodesExtension()
 
-    # 設定を読み込んで表示
-    if SETTINGS_AVAILABLE:
-        try:
-            settings_manager = get_settings_manager()
-            settings = settings_manager.get_settings()
-            print(f"EasygoingNodes settings loaded: {settings}")
-        except Exception:
-            pass
+    V3_AVAILABLE = True
+except ImportError as e:
 
-    # sdxl_clip.pyの置き換え
-    if custom_sdxl_clip_path.exists():
-        if is_module_replacement_enabled("sdxl_clip"):
-            if replace_module_with_custom("comfy.sdxl_clip", custom_sdxl_clip_path):
-                applied_modules.append("sdxl_clip")
-        else:
-            skipped_modules.append("sdxl_clip")
+    import traceback
+    print(
+        f"EasygoingNodes: failed to import V3 node API or node modules "
+        f"({e.__class__.__name__}: {e}). Falling back to legacy (no nodes "
+        f"registered on this ComfyUI version if V3 is genuinely unavailable; "
+        f"otherwise this indicates a bug in nodes/ that should be fixed, "
+        f"see traceback below)."
+    )
+    traceback.print_exc()
 
-    # 結果のサマリーを表示
-    if applied_modules:
-        print(f"✓ Applied module replacements: {', '.join(applied_modules)}")
-    if skipped_modules:
-        print(f"⊘ Skipped module replacements: {', '.join(skipped_modules)}")
+    V3_AVAILABLE = False
+    NODE_LIST = []
 
-    return True
-
-def setup_web_api():
-    """ComfyUIのWebサーバーにAPIルートを登録"""
-    if not SETTINGS_AVAILABLE:
-        return
-
-    try:
-        import server
-        if hasattr(server, 'PromptServer'):
-            app = server.PromptServer.instance.app
-            register_api_routes(app)
-    except Exception:
-        pass
-
-# モジュール置換を実行
-try:
-    apply_custom_modules()
-    setup_web_api()
-except Exception:
-    pass
-
-# nodesパッケージからノード定義をインポート
-# 分割構成: nodes/color_nodes.py / nodes/save_nodes.py / nodes/merge_nodes.py
-try:
-    from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-except ImportError:
-    # フォールバック: 旧来の単一ファイルからインポート
-    try:
-        from .easygoing_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-    except ImportError:
-        NODE_CLASS_MAPPINGS = {}
-        NODE_DISPLAY_NAME_MAPPINGS = {}
-
-# Web拡張機能の定義
+# Web extension definition.
 WEB_DIRECTORY = "./web"
 
-__all__ = [
-    'NODE_CLASS_MAPPINGS',
-    'NODE_DISPLAY_NAME_MAPPINGS',
-    'WEB_DIRECTORY'
-]
+if V3_AVAILABLE:
+    __all__ = [
+        'WEB_DIRECTORY',
+        'comfy_entrypoint',
+    ]
+else:
+    print(
+        "EasygoingNodes: comfy_api.latest (V3 node API) not found. "
+        "This version of the pack requires a ComfyUI build with V3 node support; "
+        "nodes will not be registered on this ComfyUI version."
+    )
+    NODE_CLASS_MAPPINGS = {}
+    NODE_DISPLAY_NAME_MAPPINGS = {}
+
+    __all__ = [
+        'NODE_CLASS_MAPPINGS',
+        'NODE_DISPLAY_NAME_MAPPINGS',
+        'WEB_DIRECTORY',
+    ]

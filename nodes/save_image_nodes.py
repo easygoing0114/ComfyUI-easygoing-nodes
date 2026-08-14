@@ -1,124 +1,135 @@
-import os
 import json
-import numpy as np
-import torch
 import re
+
+import numpy as np
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
+
 import folder_paths
 from comfy.cli_args import args
+from comfy_api.latest import io
+
+# ------------------------------------------------------------------------------
+# Node: Save Image With Prompt
+# ------------------------------------------------------------------------------
+
+_MAX_PREFIX_LEN = 180
+_COMPRESS_LEVEL = 4
 
 
-class SaveImageWithPrompt:
-    def __init__(self):
-        self.output_dir = folder_paths.get_output_directory()
-        self.type = "output"
-        self.prefix_append = ""
-        self.compress_level = 4
+class SaveImageWithPrompt(io.ComfyNode):
+    """Saves images with positive/additional/negative prompt, caption, and seed
+    embedded as PNG metadata, in addition to the standard workflow metadata."""
+
+    NODE_ID_LEGACY = "SaveImageWithPrompt"
+    # Widget-only inputs, in the order used by the V1 INPUT_TYPES (excludes the
+    # "images" socket input). Required for positional widget-value migration.
+    NODE_ID_INPUT_ORDER = (
+        "filename_prefix",
+        "positive_prompt",
+        "additional_prompt",
+        "negative_prompt",
+        "caption",
+        "seed",
+        "numbers",
+    )
 
     @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "images": ("IMAGE",),
-                "filename_prefix": ("STRING", {"default": "ComfyUI"}),
-                "positive_prompt": ("STRING", {"default": ""}),
-                "additional_prompt": ("STRING", {"default": ""}),
-                "negative_prompt": ("STRING", {"default": ""}),
-                "caption": ("STRING", {"default": ""}),
-                "seed": ("STRING", {"default": ""}),  # 追加: string形式のseed入力
-                "numbers": (
-                    "BOOLEAN",
-                    {
-                        "default": True,
-                        "label_on": "Include Numbers",
-                        "label_off": "No Numbers",
-                    },
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_SaveImageWithPrompt",
+            display_name="Save Image With Prompt",
+            category="image",
+            description="Saves images to your ComfyUI output directory with positive (x2) and "
+                        "negative prompts, caption, and seed in metadata.",
+            is_output_node=True,
+            inputs=[
+                io.Image.Input("images"),
+                io.String.Input("filename_prefix", default="ComfyUI"),
+                io.String.Input("positive_prompt", default=""),
+                io.String.Input("additional_prompt", default=""),
+                io.String.Input("negative_prompt", default=""),
+                io.String.Input("caption", default=""),
+                io.String.Input("seed", default=""),
+                io.Boolean.Input(
+                    "numbers",
+                    default=True,
+                    label_on="Include Numbers",
+                    label_off="No Numbers",
                 ),
-            },
-            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
-        }
+            ],
+            outputs=[],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
+        )
 
-    RETURN_TYPES = ()
-    FUNCTION = "save_images"
-    OUTPUT_NODE = True
-    CATEGORY = "image"
-    DESCRIPTION = "Saves images to your ComfyUI output directory with positive (x2) and negative prompts, caption, and seed in metadata."
-
-    def save_images(
-        self,
+    @classmethod
+    def execute(
+        cls,
         images,
-        filename_prefix="ComfyUI",
-        positive_prompt="",
-        additional_prompt="",
-        negative_prompt="",
-        caption="",
-        seed="",  # 追加: 関数の引数
-        numbers=True,
-        prompt=None,
-        extra_pnginfo=None,
-    ):
-        # ファイル名プレフィックスを180文字以内に制限
-        if len(filename_prefix) > 180:
-            filename_prefix = filename_prefix[:180]
-        filename_prefix = re.sub(r'\s+', '_', filename_prefix)
+        filename_prefix: str = "ComfyUI",
+        positive_prompt: str = "",
+        additional_prompt: str = "",
+        negative_prompt: str = "",
+        caption: str = "",
+        seed: str = "",
+        numbers: bool = True,
+    ) -> io.NodeOutput:
+        # Sanitize prefix: cap length, collapse whitespace.
+        filename_prefix = re.sub(r'\s+', '_', filename_prefix[:_MAX_PREFIX_LEN])
 
-        filename_prefix += self.prefix_append
+        output_dir = folder_paths.get_output_directory()
         full_output_folder, filename, counter, subfolder, filename_prefix = (
             folder_paths.get_save_image_path(
-                filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
+                filename_prefix, output_dir, images[0].shape[1], images[0].shape[0]
             )
         )
-        results = list()
 
+        prompt = cls.hidden.prompt
+        extra_pnginfo = cls.hidden.extra_pnginfo
+
+        text_fields = {
+            "positive_prompt": positive_prompt,
+            "additional_prompt": additional_prompt,
+            "negative_prompt": negative_prompt,
+            "caption": caption,
+            "seed": seed,
+        }
+
+        results = []
         for batch_number, image in enumerate(images):
-            i = 255.0 * image.cpu().numpy()
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            img_array = (255.0 * image.cpu().numpy()).clip(0, 255).astype(np.uint8)
+            img = Image.fromarray(img_array)
+
             metadata = None
             if not args.disable_metadata:
                 metadata = PngInfo()
                 if prompt is not None:
                     metadata.add_text("prompt", json.dumps(prompt))
-                if positive_prompt:
-                    metadata.add_text("positive_prompt", json.dumps(positive_prompt))
-                if additional_prompt:
-                    metadata.add_text("additional_prompt", json.dumps(additional_prompt))
-                if negative_prompt:
-                    metadata.add_text("negative_prompt", json.dumps(negative_prompt))
-                if caption:
-                    metadata.add_text("caption", json.dumps(caption))
-                if seed:  # 追加: メタデータへの保存処理
-                    metadata.add_text("seed", json.dumps(seed))
+                for key, value in text_fields.items():
+                    if value:
+                        metadata.add_text(key, json.dumps(value))
                 if extra_pnginfo is not None:
-                    for x in extra_pnginfo:
-                        metadata.add_text(x, json.dumps(extra_pnginfo[x]))
+                    for key, value in extra_pnginfo.items():
+                        metadata.add_text(key, json.dumps(value))
 
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
-
-            if numbers:
-                file = f"{filename_with_batch_num}_{counter:05}_.png"
-            else:
-                file = f"{filename_with_batch_num}.png"
+            file = (
+                f"{filename_with_batch_num}_{counter:05}_.png"
+                if numbers
+                else f"{filename_with_batch_num}.png"
+            )
 
             img.save(
-                os.path.join(full_output_folder, file),
+                f"{full_output_folder}/{file}",
                 pnginfo=metadata,
-                compress_level=self.compress_level,
+                compress_level=_COMPRESS_LEVEL,
             )
-            results.append(
-                {"filename": file, "subfolder": subfolder, "type": self.type}
-            )
+            results.append({"filename": file, "subfolder": subfolder, "type": "output"})
             counter += 1
 
-        return {"ui": {"images": results}}
+        return io.NodeOutput(ui={"images": results})
 
 
-# ---- ノード登録用マッピング ----
-
-NODE_CLASS_MAPPINGS = {
-    "SaveImageWithPrompt": SaveImageWithPrompt,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "SaveImageWithPrompt": "Save Image With Prompt",
-}
+NODE_LIST = [
+    SaveImageWithPrompt,
+]

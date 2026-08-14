@@ -1,9 +1,3 @@
-// workflowImageExport.js
-//
-// Note: ds.scale must stay at 1. Upscaling is done via ctx.setTransform(),
-// not ds.scale, since changing ds.scale triggers zoom-dependent logic in
-// litegraph and third-party extensions that breaks link rendering.
-
 import { app } from "../../../scripts/app.js";
 
 function nextFrame() {
@@ -35,22 +29,97 @@ async function waitForNodeImages() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// DOM widgets (e.g. the multiline "text" widget used by CLIP Text Encode)
-// are backed by a real HTMLTextAreaElement/HTMLInputElement that litegraph
-// positions on top of the canvas with CSS. lgCanvas.draw() only paints the
-// <canvas> 2D context, so it never picks up whatever is inside that
-// overlaid DOM element. When the canvas is temporarily swapped for the
-// virtual (offscreen) one during export, those widgets end up rendered as
-// blank space.
-//
-// To fix this we temporarily force every DOM widget on the graph into a
-// manual "draw as text on canvas" mode for the duration of the capture,
-// then restore its normal behavior afterwards.
-// ---------------------------------------------------------------------------
-
+// ComfyUI frontend's own DOM widget detection
+// (src/scripts/domWidget.ts, isDOMWidget) checks only `element`.
+// `inputEl` is a deprecated legacy alias for the same DOM element and is
+// never set without `element` also being set, so checking it separately
+// only widens the match without adding coverage. Checking `widget.type`
+// is unreliable: node authors are free to use "customtext"/"textarea" as
+// a *canvas* widget type, and doing so previously caused non-DOM widgets
+// (e.g. toggle/combo widgets on custom nodes) to be misidentified as DOM
+// widgets, which made drawDomWidgetFallback paint an empty black box over
+// them instead of letting their normal canvas draw() run.
 function isDomWidget(widget) {
-  return !!(widget && (widget.element || widget.inputEl || widget.type === "customtext" || widget.type === "textarea"));
+  return !!(widget && widget.element);
+}
+
+// ComfyUI_frontend's "text preview" pseudo-widgets -- e.g. PreviewAny
+// ("Preview as Text", widget name "textPreview", widget.type ===
+// "textPreview") and GetImageSize's live progress-text overlay
+// (widget name "progressText", widget.type === "$$node-text-preview",
+// populated via send_progress_text / PromptServer) -- are NOT
+// registered through node.addDOMWidget(). They never get a
+// `.element`/`.inputEl` at all; ComfyUI_frontend paints them through
+// a separate overlay layer keyed off widget.type and widget.value
+// directly, bypassing the normal canvas draw() path entirely.
+//
+// These pseudo-widget type names are NOT consistently prefixed --
+// "textPreview" has no "$$" prefix while "$$node-text-preview" does
+// -- so we can't key off a naming convention. Instead we treat any
+// widget with no backing element and a type that isn't one of
+// litegraph's known *canvas-drawn* primitive widget types (number,
+// combo, toggle, button, text/customtext for plain text inputs
+// without an element, etc.) as a candidate, then require it to
+// actually carry displayable value content. This stays conservative:
+// ordinary canvas-native widgets (number/combo/toggle/button/slider)
+// are explicitly excluded so we never accidentally intercept their
+// normal draw().
+const KNOWN_CANVAS_NATIVE_WIDGET_TYPES = new Set([
+  "number",
+  "combo",
+  "toggle",
+  "button",
+  "slider",
+  "text",
+  "customtext",
+  "boolean",
+  "int",
+  "float",
+  "string",
+  "seed",
+  "color",
+  "$$canvas-image-preview",
+]);
+
+function isTextPreviewPseudoWidget(widget) {
+  if (!widget || widget.element || widget.inputEl) return false;
+  if (typeof widget.type !== "string" || !widget.type) return false;
+  if (KNOWN_CANVAS_NATIVE_WIDGET_TYPES.has(widget.type)) return false;
+  // Require an explicit draw()/computeSize() override or a "$$"-style
+  // internal type name -- both are signals this widget renders itself
+  // outside litegraph's normal per-type switch (ComfyWidgets registry)
+  // rather than just being an unrecognized-but-still-canvas-drawn type.
+  const looksInternal = widget.type.startsWith("$$") || /preview/i.test(widget.type);
+  return looksInternal;
+}
+
+function getPseudoWidgetText(widget) {
+  if (typeof widget.value === "string") return widget.value;
+  if (Array.isArray(widget.value)) {
+    // GetImageSize/PreviewAny sometimes store the display string as
+    // the sole element of a tuple/array (mirrors the Python side's
+    // `{"ui": {"text": (value,)}}` convention).
+    const first = widget.value[0];
+    if (typeof first === "string") return first;
+  }
+  if (widget.value != null) return String(widget.value);
+  return "";
+}
+
+// Only textarea / text-like input elements represent an editable text
+// value we can meaningfully render as a text box. Other DOM widgets
+// (e.g. audio players, upload buttons, custom previews) have an
+// `element` too, but drawing them as an empty bordered text box is
+// misleading, so we skip those instead of drawing a placeholder.
+function isTextLikeElement(el) {
+  if (!el || typeof el.tagName !== "string") return false;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "textarea") return true;
+  if (tag === "input") {
+    const inputType = (el.type || "text").toLowerCase();
+    return inputType === "text" || inputType === "search" || inputType === "url";
+  }
+  return false;
 }
 
 function getWidgetText(widget) {
@@ -84,20 +153,125 @@ function wrapText(ctx, text, maxWidth) {
   return lines;
 }
 
-// Draws a DOM-backed widget's current text value directly onto the 2D
-// context, mimicking litegraph's normal widget box styling closely enough
-// to be legible in the exported image.
+// Since ComfyUI_frontend v1.16, widgets and their equivalent input
+// sockets simply coexist on a node -- there is no more "conversion"
+// step, and widget.type never becomes "converted-widget"
+// (Comfy.WidgetInputs' convertWidgetToInput is now just a deprecated
+// no-op stub). So a widget like `text` on CLIP Text Encode (with
+// Offload) being driven by a Concatenate Text node still shows up in
+// node.widgets, completely indistinguishable by `type` from a normal,
+// freely-editable widget like `value` on Text (Multiline).
+//
+// litegraph's own internal visibility/layout logic has a known
+// mismatch here too (Comfy-Org/ComfyUI_frontend#10276): computeSize()
+// calls isWidgetVisible(), while the actual widget layout pass only
+// filters on `hidden` -- so even litegraph itself can reserve blank
+// space for a widget whose real content isn't shown. We can't rely on
+// isWidgetVisible()/hidden/computedDisabled for the same reason noted
+// below (they reflect live-canvas/zoom state, not link-driven state,
+// and previously misfired on Text (Multiline)'s `value` widget).
+//
+// The one thing that's actually true and stable regardless of canvas
+// state is the link itself: a widget is link-driven if there is an
+// input slot with the same name AND that slot has an active link
+// (inp.link !== null/undefined). This mirrors how ComfyUI_frontend's
+// own Vue widget layer determines this (see
+// isInputConnected(getWidgetInputIndex(widget)) in NodeWidgets.vue,
+// Comfy-Org/ComfyUI_frontend#5692). Matching on name alone (without
+// checking `link`) is what caused the earlier false positive on
+// Text (Multiline): that node happened to have a same-named, but
+// unconnected, input slot.
+function isWidgetHidden(widget, node) {
+  if (!widget) return true;
+  if (!Array.isArray(node.inputs)) return false;
+  return node.inputs.some((inp) => inp && inp.name === widget.name && inp.link != null);
+}
+
 function drawDomWidgetFallback(ctx, node, widget, widgetWidth, y, height) {
-  const text = getWidgetText(widget);
+  const el = widget.inputEl || widget.element;
+  const isPseudo = isTextPreviewPseudoWidget(widget);
+
+  if (isWidgetHidden(widget, node)) {
+    console.log("[WorkflowImageExport] skip (link-driven):", node.title, widget.name, {
+      inputs: Array.isArray(node.inputs) ? node.inputs.map((i) => ({ name: i && i.name, link: i && i.link })) : null,
+    });
+    return;
+  }
+
+  if (!isPseudo && !isTextLikeElement(el)) {
+    console.log("[WorkflowImageExport] skip (not text-like element):", node.title, widget.name, {
+      type: widget.type,
+      tagName: el && el.tagName,
+      hasElement: !!widget.element,
+      hasInputEl: !!widget.inputEl,
+    });
+    return;
+  }
+
+  const text = isPseudo ? getPseudoWidgetText(widget) : getWidgetText(widget);
+  const inputsInfo = Array.isArray(node.inputs)
+    ? node.inputs.map((inp) => ({
+        name: inp && inp.name,
+        hasWidget: !!(inp && inp.widget),
+        widgetIsSameRef: !!(inp && inp.widget && inp.widget === widget),
+        widgetName: inp && inp.widget && inp.widget.name,
+        link: inp && inp.link,
+      }))
+    : null;
+  // The `height` litegraph passes into draw() for a DOM widget is only
+  // its internal placeholder/layout height, not the actual rendered size
+  // of the textarea (which is sized by CSS, independent of litegraph's
+  // canvas layout). Using that placeholder height here under-counts
+  // maxLines and silently clips multi-line text down to (often) a single
+  // line. The textarea's own rendered box is the source of truth for how
+  // tall this widget actually looks on screen, so prefer that.
+  let boxHeight = height;
+  if (el) {
+    if (typeof el.getBoundingClientRect === "function") {
+      const rect = el.getBoundingClientRect();
+      if (rect.height > boxHeight) boxHeight = rect.height;
+    }
+    if (typeof el.offsetHeight === "number" && el.offsetHeight > boxHeight) {
+      boxHeight = el.offsetHeight;
+    }
+    if (typeof el.scrollHeight === "number" && el.scrollHeight > boxHeight) {
+      boxHeight = el.scrollHeight;
+    }
+  } else if (isPseudo) {
+    // No backing element to measure. These Vue overlay widgets size
+    // themselves to their text content client-side; litegraph's
+    // passed-in `height` is just its own layout placeholder and is
+    // often too short (e.g. 1 line) for multi-line preview text.
+    // Estimate from the actual text so multi-line values (Preview as
+    // Text on a long prompt) aren't clipped to one line.
+    const padY = 6;
+    const lineHeight = 14;
+    const maxWidth = widgetWidth - 8 * 2 - 6 * 2;
+    ctx.font = "12px Arial";
+    const estimatedLines = wrapText(ctx, text || "", maxWidth).length || 1;
+    const estimatedHeight = estimatedLines * lineHeight + padY * 2;
+    if (estimatedHeight > boxHeight) boxHeight = estimatedHeight;
+  }
+
+  console.log("[WorkflowImageExport] drawing:", node.title, widget.name, {
+    textLength: text.length,
+    text: text.slice(0, 80),
+    tagName: el ? el.tagName : "(none - pseudo-widget)",
+    elementValue: el && typeof el.value === "string" ? el.value.slice(0, 80) : el && el.value,
+    widgetValue: typeof widget.value === "string" ? widget.value.slice(0, 80) : widget.value,
+    passedInHeight: height,
+    resolvedBoxHeight: boxHeight,
+    inputsInfo,
+  });
   const margin = 8;
 
   ctx.save();
   ctx.beginPath();
   const radius = 4;
   if (ctx.roundRect) {
-    ctx.roundRect(margin, y, widgetWidth - margin * 2, height, radius);
+    ctx.roundRect(margin, y, widgetWidth - margin * 2, boxHeight, radius);
   } else {
-    ctx.rect(margin, y, widgetWidth - margin * 2, height);
+    ctx.rect(margin, y, widgetWidth - margin * 2, boxHeight);
   }
   ctx.fillStyle = "#1a1a1a";
   ctx.fill();
@@ -116,7 +290,7 @@ function drawDomWidgetFallback(ctx, node, widget, widgetWidth, y, height) {
   const lineHeight = 14;
   const maxWidth = widgetWidth - margin * 2 - padX * 2;
   const lines = wrapText(ctx, text || "", maxWidth);
-  const maxLines = Math.max(1, Math.floor((height - padY * 2) / lineHeight));
+  const maxLines = Math.max(1, Math.floor((boxHeight - padY * 2) / lineHeight));
 
   for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
     ctx.fillText(lines[i], margin + padX, y + padY + i * lineHeight);
@@ -125,18 +299,46 @@ function drawDomWidgetFallback(ctx, node, widget, widgetWidth, y, height) {
   ctx.restore();
 }
 
-// Monkeypatches every DOM widget currently in the graph so that, instead of
-// relying on its real (offscreen, un-swapped) DOM element, it paints its
-// text value onto whatever canvas context it's given. Returns a restore
-// function that undoes the patch.
 function forceDomWidgetsToCanvasDraw() {
   const patched = [];
 
   for (const node of app.graph._nodes) {
     if (!node.widgets) continue;
     for (const widget of node.widgets) {
-      if (!isDomWidget(widget)) continue;
+      const isPseudo = isTextPreviewPseudoWidget(widget);
 
+      if (!isDomWidget(widget) && !isPseudo) {
+        console.log("[WorkflowImageExport] not a DOM widget:", node.title, widget.name, widget.type);
+        continue;
+      }
+      // Link-driven widgets (a same-named input slot with an active
+      // link): leave them alone. Their real value comes over the link,
+      // not from typing into the DOM element, so patching draw() on them
+      // would only ever show stale/empty content.
+      if (isWidgetHidden(widget, node)) {
+        console.log("[WorkflowImageExport] patch-skip (link-driven):", node.title, widget.name);
+        continue;
+      }
+      // Non text-holding DOM widgets (audio players, upload buttons,
+      // previews, etc) are left with their normal draw() so they don't
+      // lose their own rendering to an unconditional no-op/fallback.
+      // Pseudo-widgets (Preview as Text / Get Image Size's progress
+      // text) have no element to check here -- they're identified by
+      // widget.type instead, already confirmed via isPseudo above.
+      const el = widget.inputEl || widget.element;
+      if (!isPseudo && !isTextLikeElement(el)) {
+        console.log("[WorkflowImageExport] patch-skip (not text-like):", node.title, widget.name, {
+          tagName: el && el.tagName,
+        });
+        continue;
+      }
+
+      console.log(
+        "[WorkflowImageExport] patching widget:",
+        node.title,
+        widget.name,
+        isPseudo ? widget.type : el.tagName
+      );
       const originalDraw = widget.draw;
       const originalComputeSize = widget.computeSize ? widget.computeSize.bind(widget) : null;
 
@@ -155,7 +357,7 @@ function forceDomWidgetsToCanvasDraw() {
   };
 }
 
-class PngWorkflowImage {
+class EasygoingPngWorkflowImage {
   extension = "png";
 
   static HIRES_SCALE = 4;
@@ -191,8 +393,8 @@ class PngWorkflowImage {
     const w = bounds[2] - bounds[0];
     const h = bounds[3] - bounds[1];
 
-    const dimLimit = PngWorkflowImage.MAX_CANVAS_DIMENSION;
-    const pxLimit = PngWorkflowImage.MAX_CANVAS_PIXELS;
+    const dimLimit = EasygoingPngWorkflowImage.MAX_CANVAS_DIMENSION;
+    const pxLimit = EasygoingPngWorkflowImage.MAX_CANVAS_PIXELS;
 
     const dimScaleLimit = Math.min(dimLimit / w, dimLimit / h);
     const pxScaleLimit = Math.sqrt(pxLimit / (w * h));
@@ -400,8 +602,8 @@ class PngWorkflowImage {
 
   crc32(data) {
     const crcTable =
-      PngWorkflowImage.crcTable ||
-      (PngWorkflowImage.crcTable = (() => {
+      EasygoingPngWorkflowImage.crcTable ||
+      (EasygoingPngWorkflowImage.crcTable = (() => {
         let c;
         const crcTable = [];
         for (let n = 0; n < 256; n++) {
@@ -469,27 +671,15 @@ app.registerExtension({
         submenu: {
           options: [
             {
-              content: "Export PNG (embedded workflow)",
+              content: `Export PNG (embedded workflow, Hires x${EasygoingPngWorkflowImage.HIRES_SCALE})`,
               callback: () => {
-                new PngWorkflowImage().export(true);
+                new EasygoingPngWorkflowImage().export(true, EasygoingPngWorkflowImage.HIRES_SCALE);
               },
             },
             {
-              content: `Export PNG (embedded workflow, Hires x${PngWorkflowImage.HIRES_SCALE})`,
+              content: `Export PNG (no embedded workflow, Hires x${EasygoingPngWorkflowImage.HIRES_SCALE})`,
               callback: () => {
-                new PngWorkflowImage().export(true, PngWorkflowImage.HIRES_SCALE);
-              },
-            },
-            {
-              content: "Export PNG (no embedded workflow)",
-              callback: () => {
-                new PngWorkflowImage().export(false);
-              },
-            },
-            {
-              content: `Export PNG (no embedded workflow, Hires x${PngWorkflowImage.HIRES_SCALE})`,
-              callback: () => {
-                new PngWorkflowImage().export(false, PngWorkflowImage.HIRES_SCALE);
+                new EasygoingPngWorkflowImage().export(false, EasygoingPngWorkflowImage.HIRES_SCALE);
               },
             },
           ],
