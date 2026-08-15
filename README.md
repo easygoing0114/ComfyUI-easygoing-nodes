@@ -115,7 +115,7 @@ The experimental `sdxl_clip.py` replacement (enhanced attention mask / tokenizat
 
 ### Recommended: ComfyUI Manager / Registry
 
-div align="center">
+<div align="center">
 <img width="640" height="343" alt="comfyui nodes manager easygoing search with comment" src="Images/comfyui_nodes_manager_easygoing_search_with_comment.png">
 </div>
 
@@ -142,8 +142,8 @@ Requirement: A ComfyUI build that supports the V3 node API (`comfy_api.latest`).
 
 ## Links
 
-- Guide article (v2.0.0): [English](https://www.ai-image-journey.com/2026/08/comfyui-easygoing-nodes-v2.html) | [Japanese](https://note.com/ai_image_journey/n/n7a61e769edab)
-- Guide article (v1.0.0): [English](https://www.ai-image-journey.com/2025/09/comfyui-easygoing-nodes.html) | [Japanese](https://note.com/ai_image_journey/n/n5bb33311b866)
+- Guide v2.0.0 (External site): [English](https://www.ai-image-journey.com/2026/08/comfyui-easygoing-nodes-v2.html) | [Japanese](https://note.com/ai_image_journey/n/n7a61e769edab)
+- Guide v1.0.0 (External site): [English](https://www.ai-image-journey.com/2025/09/comfyui-easygoing-nodes.html) | [Japanese](https://note.com/ai_image_journey/n/n5bb33311b866)
 
 ---
 
