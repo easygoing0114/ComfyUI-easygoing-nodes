@@ -105,24 +105,6 @@ Includes hierarchical model merging nodes (e.g. **Model Scale SDXL**) and relate
 
 ---
 
-## Update History
-
-### v2.1.1
-
-- `Image Difference Checker`: Replaced the grayscale difference map with a **Brightness Difference (Rec.601)** map, using Rec.601 luminance weights (0.299R + 0.587G + 0.114B) for consistency with the SSIM calculation.
-- Added a Rec.601 brightness curve (gray) drawn on top of the RGB histogram in the tone-curve graph.
-- Renamed the `grayscale_diff_map` output to `brightness_diff_map`. **Note:** this will break existing links to that output in saved workflows — reconnect the node after updating.
-
-### v2.1.0
-
-- updated `web/js/workflow_image_export.js` for ComfyUI Nodes Maneger securitu issus.
-
-### v2.0.0
-
-- The experimental `sdxl_clip.py` replacement (enhanced attention mask / tokenization) has been **removed**. Recent ComfyUI core updates made it ineffective.
-
----
-
 ## Installation
 
 ### Recommended: ComfyUI Manager / Registry
@@ -143,9 +125,24 @@ git clone https://github.com/easygoing0114/ComfyUI-easygoing-nodes.git
 Restart ComfyUI. Nodes appear under their respective categories (model loaders, image, etc.).
 Requirement: A ComfyUI build that supports the V3 node API (`comfy_api.latest`). Older ComfyUI versions without V3 support will not register the nodes.
 
-## Update Notes (v1.8.5 → v2.0.0)
+---
 
-- Full support for Nodes 2.0 and V3 schema.
+## Update Notes
+
+### v2.1.1
+
+- `Image Difference Checker`: Replaced the grayscale difference map with a **Brightness Difference (Rec.601)** map, using Rec.601 luminance weights (0.299R + 0.587G + 0.114B) for consistency with the SSIM calculation.
+- Added a Rec.601 brightness curve (gray) drawn on top of the RGB histogram in the tone-curve graph.
+- Renamed the `grayscale_diff_map` output to `brightness_diff_map`. **Note:** this will break existing links to that output in saved workflows — reconnect the node after updating.
+
+### v2.1.0
+
+- updated `web/js/workflow_image_export.js` for ComfyUI Nodes Maneger securitu issus.
+
+### v2.0.0
+
+- Major update, Full support for Nodes 2.0 and V3 schema.
+- The experimental `sdxl_clip.py` replacement (enhanced attention mask / tokenization) has been **removed**. Recent ComfyUI core updates made it ineffective.
 - Automatic node migration for existing workflows is implemented, but may not succeed in every environment.
 - If nodes appear broken or missing after the update, delete the old instances and re-add the new ones.
 - Updating ComfyUI itself is also recommended if you encounter issues.
