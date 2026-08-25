@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-easygoing-nodes"
 description = "Capture workflow screenshots, Model Load and Save Image nodes, HDR Effects with LAB adjusts, Image Difference checker nodes by easygoing0114"
-version = "2.0.2"
+version = "2.1.0"
 license = { file = "LICENSE" }
 
 [project.urls]
