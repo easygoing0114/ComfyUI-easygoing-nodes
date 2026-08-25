@@ -129,7 +129,7 @@ Requirement: A ComfyUI build that supports the V3 node API (`comfy_api.latest`).
 
 ## Update Notes
 
-### v2.1.1
+### v2.1.2
 
 - `Image Difference Checker`: Replaced the grayscale difference map with a **Brightness Difference (Rec.601)** map, using Rec.601 luminance weights (0.299R + 0.587G + 0.114B) for consistency with the SSIM calculation.
 - Added a Rec.601 brightness curve (gray) drawn on top of the RGB histogram in the tone-curve graph.
