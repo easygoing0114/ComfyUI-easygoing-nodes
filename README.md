@@ -105,9 +105,21 @@ Includes hierarchical model merging nodes (e.g. **Model Scale SDXL**) and relate
 
 ---
 
-## Removed in v2.0.0
+## Update History
 
-The experimental `sdxl_clip.py` replacement (enhanced attention mask / tokenization) has been **removed**. Recent ComfyUI core updates made it ineffective.
+### v2.1.1
+
+- `Image Difference Checker`: Replaced the grayscale difference map with a **Brightness Difference (Rec.601)** map, using Rec.601 luminance weights (0.299R + 0.587G + 0.114B) for consistency with the SSIM calculation.
+- Added a Rec.601 brightness curve (gray) drawn on top of the RGB histogram in the tone-curve graph.
+- Renamed the `grayscale_diff_map` output to `brightness_diff_map`. **Note:** this will break existing links to that output in saved workflows — reconnect the node after updating.
+
+### v2.1.0
+
+- updated `web/js/workflow_image_export.js` for ComfyUI Nodes Maneger securitu issus.
+
+### v2.0.0
+
+- The experimental `sdxl_clip.py` replacement (enhanced attention mask / tokenization) has been **removed**. Recent ComfyUI core updates made it ineffective.
 
 ---
 
