@@ -498,6 +498,52 @@ class ImageDifferenceChecker(io.ComfyNode):
             ui=ui.PreviewImage(report_tensor, cls=cls),
         )
 
+class ImageAmplify(io.ComfyNode):
+    """Multiplies pixel values by a fixed integer factor and clips to
+    [0, 1], making faint signals (e.g. a color difference map where most
+    values are near-zero) visible."""
+
+    NODE_ID_LEGACY = "ImageAmplify"
+    NODE_ID_INPUT_ORDER = (
+        "image",
+        "scale",
+    )
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ImageAmplify",
+            display_name="Image Amplify",
+            category="image/analysis",
+            description=(
+                "Amplifies an image's pixel values by a fixed scale factor "
+                "and clips the result to [0, 1]. Useful for making faint "
+                "signals, such as a color difference map, easier to see."
+            ),
+            inputs=[
+                io.Image.Input("image", tooltip="Image to amplify."),
+                io.Int.Input(
+                    "scale",
+                    default=8,
+                    min=1,
+                    max=64,
+                    step=1,
+                    tooltip="Multiplier applied to every pixel value "
+                    "before clipping to [0, 1].",
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, image: torch.Tensor, scale: int) -> io.NodeOutput:
+        amplified = torch.clamp(image * float(scale), 0.0, 1.0)
+        return io.NodeOutput(amplified)
+
+
 NODE_LIST = [
     ImageDifferenceChecker,
+    ImageAmplify,
 ]
