@@ -388,7 +388,7 @@ class ImageDifferenceChecker(io.ComfyNode):
                 io.Image.Input("image2", tooltip="Second image to compare."),
                 io.Float.Input(
                     "ui_scale",
-                    default=3.2,
+                    default=2.5,
                     min=1.0,
                     max=8.0,
                     step=0.1,
