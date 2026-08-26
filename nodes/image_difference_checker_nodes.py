@@ -474,7 +474,7 @@ class ImageDifferenceChecker(io.ComfyNode):
 
         # Composited report image.
         scale = max(1.0, ui_scale)
-        bg_color = (18, 27, 18) if dark_mode else (255, 255, 255)
+        bg_color = (18, 18, 18) if dark_mode else (255, 255, 255)
         text_color = (198, 204, 210) if dark_mode else (0, 0, 0)
         report_pil = build_report_image(
             np1, np2, color_diff_np, brightness_diff_np,
