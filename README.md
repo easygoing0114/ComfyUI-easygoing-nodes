@@ -88,7 +88,7 @@ Based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperB
 ### 6. Image Difference Checker
 
 <div align="center">
-<img width="800" height="594" alt="image difference checker sample workflow" src="Images/image_difference_checker.png">
+<img width="800" height="452" alt="image difference checker sample workflow" src="Images/image_difference_checker_image_amplify_20260828.png">
 </div>
 
 Compares two similar images and outputs:
