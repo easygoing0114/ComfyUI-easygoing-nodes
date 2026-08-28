@@ -158,8 +158,7 @@ def draw_tone_curve_graph(
     bg_color: tuple[int, int, int],
     scale: float,
 ) -> Image.Image:
-    """Render a filled RGB histogram ("tone curve") for one image, with
-    the Rec. 601 brightness histogram drawn last (i.e. on top, in gray)."""
+    """Render a filled RGB histogram ("tone curve") for one image."""
     height = int(width * 0.71)
     graph_canvas = Image.new("RGB", (width, height), color=bg_color)
     overlay = Image.new("RGBA", (width, height), bg_color + (0,))
@@ -167,7 +166,6 @@ def draw_tone_curve_graph(
     draw = ImageDraw.Draw(graph_canvas)
 
     colors = ((220, 50, 50), (50, 180, 50), (50, 50, 220))
-    brightness_color = (170, 170, 170)
 
     margin = int(10 * scale)
     graph_w = width - (margin * 2)
@@ -188,12 +186,6 @@ def draw_tone_curve_graph(
 
     for i in range(3):
         plot_channel(np_img[:, :, i] * 255, colors[i], 51)
-
-    # Rec. 601 brightness, drawn last so it sits on top of the RGB curves.
-    brightness_255 = (
-        0.299 * np_img[:, :, 0] + 0.587 * np_img[:, :, 1] + 0.114 * np_img[:, :, 2]
-    ) * 255
-    plot_channel(brightness_255, brightness_color, 60)
 
     graph_canvas.paste(overlay, (0, 0), overlay)
     return graph_canvas
@@ -253,7 +245,7 @@ def build_report_image(
         1. Input images (Image 1 / Image 2)
         2. Difference maps (Color / Brightness [Rec.601])
         3. MAE & SSIM metrics
-        4. Tone curve (RGB + Rec.601 brightness histogram) per image
+        4. Tone curve (RGB histogram) per image
         5. Tone table (ASCII) per image
     """
     pad = int(24 * scale)
