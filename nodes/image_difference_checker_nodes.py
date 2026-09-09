@@ -51,10 +51,10 @@ def _get_mono_font(size: int) -> ImageFont.FreeTypeFont:
 
 def calculate_ssim(img1: np.ndarray, img2: np.ndarray) -> float:
     """Compute a simple global (non-windowed) SSIM between two float32
-    images in [0, 1], using luminance derived from Rec. 601 coefficients."""
+    images in [0, 1], using luminance derived from Rec. 709 coefficients."""
     c1, c2 = 0.0001, 0.0009
-    g1 = 0.299 * img1[..., 0] + 0.587 * img1[..., 1] + 0.114 * img1[..., 2]
-    g2 = 0.299 * img2[..., 0] + 0.587 * img2[..., 1] + 0.114 * img2[..., 2]
+    g1 = 0.2126 * img1[..., 0] + 0.7152 * img1[..., 1] + 0.0722 * img1[..., 2]
+    g2 = 0.2126 * img2[..., 0] + 0.7152 * img2[..., 1] + 0.0722 * img2[..., 2]
     mu1, mu2 = np.mean(g1), np.mean(g2)
     var1, var2 = np.var(g1), np.var(g2)
     covar = np.mean(g1 * g2) - mu1 * mu2
@@ -72,8 +72,8 @@ _TONE_CHANNELS = ("Red", "Green", "Blue")
 
 def _channel_tone_stats(np_img: np.ndarray) -> list[tuple[str, float, float, float]]:
     """Return (channel_name, sum, avg, mean_fraction) for each RGB channel
-    of a float32 image in [0, 1], followed by an extra "Brightness" row
-    using Rec. 601 luminance weights (0.299R + 0.587G + 0.114B), matching
+    of a float32 image in [0, 1], followed by an extra "Rec.709" row
+    using Rec.709 luminance weights (0.2126R + 0.7152G + 0.0722B), matching
     the luminance definition used by calculate_ssim()."""
     stats = []
     for i, name in enumerate(_TONE_CHANNELS):
@@ -86,11 +86,11 @@ def _channel_tone_stats(np_img: np.ndarray) -> list[tuple[str, float, float, flo
         ))
 
     brightness = (
-        0.299 * np_img[:, :, 0] + 0.587 * np_img[:, :, 1] + 0.114 * np_img[:, :, 2]
+        0.2126 * np_img[:, :, 0] + 0.7152 * np_img[:, :, 1] + 0.0722 * np_img[:, :, 2]
     )
     brightness_255 = brightness * 255.0
     stats.append((
-        "Brightness",
+        "Rec.709",
         float(np.sum(brightness_255)),
         float(np.mean(brightness_255)),
         float(np.mean(brightness)),
@@ -243,7 +243,7 @@ def build_report_image(
 
     Section order (each optional except MAE/SSIM, which is always shown):
         1. Input images (Image 1 / Image 2)
-        2. Difference maps (Color / Brightness [Rec.601])
+        2. Difference maps (Color / Brightness [Rec.709])
         3. MAE & SSIM metrics
         4. Tone curve (RGB histogram) per image
         5. Tone table (ASCII) per image
@@ -312,7 +312,7 @@ def build_report_image(
         if show_original:
             curr_y += gap
         paste_panel(color_diff_np, "Color Difference", left_x, curr_y, w)
-        paste_panel(brightness_diff_np, "Brightness Difference (Rec.601)", right_x, curr_y, w)
+        paste_panel(brightness_diff_np, "Brightness Difference (Rec.709)", right_x, curr_y, w)
         curr_y += label_h + h
 
     # 3) MAE & SSIM (always shown)
@@ -371,7 +371,7 @@ class ImageDifferenceChecker(io.ComfyNode):
             category="image/analysis",
             description=(
                 "Compares two same-resolution images and reports their "
-                "differences: a color diff map, a Rec.601 brightness diff "
+                "differences: a color diff map, a Rec.709 brightness diff "
                 "map, a composited visual report (MAE/SSIM + optional tone "
                 "analysis), and a Markdown text summary."
             ),
@@ -380,7 +380,7 @@ class ImageDifferenceChecker(io.ComfyNode):
                 io.Image.Input("image2", tooltip="Second image to compare."),
                 io.Float.Input(
                     "ui_scale",
-                    default=2.5,
+                    default=2.6,
                     min=1.0,
                     max=8.0,
                     step=0.1,
@@ -443,8 +443,8 @@ class ImageDifferenceChecker(io.ComfyNode):
 
         # Difference maps.
         color_diff_np = np.abs(np1 - np2)[:, :, :3]
-        brightness1 = 0.299 * np1[:, :, 0] + 0.587 * np1[:, :, 1] + 0.114 * np1[:, :, 2]
-        brightness2 = 0.299 * np2[:, :, 0] + 0.587 * np2[:, :, 1] + 0.114 * np2[:, :, 2]
+        brightness1 = 0.2126 * np1[:, :, 0] + 0.7152 * np1[:, :, 1] + 0.0722 * np1[:, :, 2]
+        brightness2 = 0.2126 * np2[:, :, 0] + 0.7152 * np2[:, :, 1] + 0.0722 * np2[:, :, 2]
         brightness_diff = np.clip(np.abs(brightness1 - brightness2), 0, 1)
         brightness_diff_np = np.stack([brightness_diff, brightness_diff, brightness_diff], axis=-1)
 

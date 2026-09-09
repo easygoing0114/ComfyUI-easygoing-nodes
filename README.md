@@ -1,4 +1,3 @@
-
 <div align="center">
 <img width="800" height="343" alt="ComfyUI Easygoing Nodes banner image" src="Images/easygoing_banner_image.png">
 </div>
@@ -88,7 +87,7 @@ Based on the HDR processing from [ComfyUI-SuperBeasts](https://github.com/SuperB
 ### 6. Image Difference Checker
 
 <div align="center">
-<img width="800" height="452" alt="image difference checker sample workflow" src="Images/image_difference_checker_image_amplify_20260828.png">
+<img width="800" height="594" alt="image difference checker sample workflow" src="Images/image_difference_checker.png">
 </div>
 
 Compares two similar images and outputs:
@@ -128,6 +127,10 @@ Requirement: A ComfyUI build that supports the V3 node API (`comfy_api.latest`).
 ---
 
 ## Update Notes
+
+### v2.1.7
+
+- `Image Difference Checker`: Changed the luminance calculation from **Rec.601** to **Rec.709** weights (0.2126R + 0.7152G + 0.0722B), used by both the SSIM calculation and the Brightness Difference map. This better matches the sRGB/Rec.709 color space that ComfyUI images are typically in. **Note:** this changes the numeric output of SSIM, the brightness diff map, and the Brightness row in the tone table compared to earlier versions — results are not directly comparable to those from before this update.
 
 ### v2.1.2
 
