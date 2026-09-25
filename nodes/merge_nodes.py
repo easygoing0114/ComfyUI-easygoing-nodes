@@ -223,6 +223,14 @@ _QWEN_IMAGE_LAYER_KEYS = [
     "proj_out.",
 ]
 
+# Qwen-Image 2.1: distinct key layout from Qwen-Image (no pos_embeds./txt_norm.,
+# adds modulation./norm_out., 32 transformer_blocks with img_mlp.gate_up/out naming).
+_QWEN_IMAGE_2_1_LAYER_KEYS = [
+    "img_in.", "modulation.1.", "norm_out.", "time_text_embed.", "txt_in.",
+    *numbered_keys("transformer_blocks.", 32),
+    "proj_out.",
+]
+
 _Z_IMAGE_LAYER_KEYS = [
     "cap_embedder.", "cap_pad_token",
     *numbered_keys("context_refiner.", 2),
@@ -454,6 +462,31 @@ class ModelScaleQwenImage(io.ComfyNode):
             display_name="Model Scale Qwen Image",
             category="advanced/model_merging/model_specific",
             inputs=build_scale_inputs(_QWEN_IMAGE_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Scale Qwen Image 2.1
+# ------------------------------------------------------------------------------
+
+class ModelScaleQwenImage2_1(io.ComfyNode):
+    """Scale Qwen-Image 2.1 model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleQwenImage2_1",
+            display_name="Model Scale Qwen Image 2.1",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of Qwen-Image 2.1 models. "
+                        "Assumes 32 transformer_blocks. "
+                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_QWEN_IMAGE_2_1_LAYER_KEYS, "model", io.Model),
             outputs=single_output(io.Model),
         )
 
@@ -1060,6 +1093,7 @@ NODE_LIST = [
     ModelMergeHiDream,
     ModelScaleHiDream,
     ModelScaleQwenImage,
+    ModelScaleQwenImage2_1,
     ModelMergeZImage,
     ModelScaleZImage,
     ModelScaleKrea2,
