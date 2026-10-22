@@ -1,278 +1,145 @@
 import { app } from "../../../scripts/app.js";
 
-function nextFrame() {
-  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-}
+const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
 
 async function waitForNodeImages() {
   const promises = [];
   for (const node of app.graph._nodes) {
-    const imgs = node.imgs;
-    if (!imgs || !imgs.length) continue;
-    for (const img of imgs) {
-      if (!img) continue;
-      if (img.complete && img.naturalWidth !== 0) continue;
-      if (typeof img.decode === "function") {
-        promises.push(img.decode().catch(() => {}));
-      } else {
-        promises.push(
-          new Promise((resolve) => {
-            img.addEventListener("load", () => resolve(), { once: true });
-            img.addEventListener("error", () => resolve(), { once: true });
-          })
-        );
-      }
+    for (const img of node.imgs || []) {
+      if (!img || (img.complete && img.naturalWidth !== 0)) continue;
+      promises.push(
+        typeof img.decode === "function"
+          ? img.decode().catch(() => {})
+          : new Promise((resolve) => {
+              img.addEventListener("load", () => resolve(), { once: true });
+              img.addEventListener("error", () => resolve(), { once: true });
+            })
+      );
     }
   }
-  if (promises.length) {
-    await Promise.all(promises);
-  }
+  if (promises.length) await Promise.all(promises);
 }
 
-// A widget is DOM-backed if it has an `element` (ComfyUI frontend's own
-// isDOMWidget check). `inputEl` is a deprecated alias for the same thing.
-function isDomWidget(widget) {
-  return !!(widget && widget.element);
-}
-
-// ComfyUI_frontend's "text preview" pseudo-widgets (e.g. PreviewAny's
-// "textPreview", GetImageSize's "$$node-text-preview") have no
-// `.element`/`.inputEl` -- they're painted via a separate overlay layer
-// keyed off widget.type/widget.value, bypassing canvas draw() entirely.
-// Their type names aren't consistently prefixed, so we treat any widget
-// with no backing element and a type outside litegraph's known
-// canvas-drawn primitives as a candidate pseudo-widget.
-const KNOWN_CANVAS_NATIVE_WIDGET_TYPES = new Set([
-  "number",
-  "combo",
-  "toggle",
-  "button",
-  "slider",
-  "text",
-  "customtext",
-  "boolean",
-  "int",
-  "float",
-  "string",
-  "seed",
-  "color",
-  "$$canvas-image-preview",
+const NATIVE_WIDGET_TYPES = new Set([
+  "number", "combo", "toggle", "button", "slider", "text", "customtext",
+  "boolean", "int", "float", "string", "seed", "color", "$$canvas-image-preview",
 ]);
 
-function isTextPreviewPseudoWidget(widget) {
+function isPreviewPseudoWidget(widget) {
   if (!widget || widget.element || widget.inputEl) return false;
-  if (typeof widget.type !== "string" || !widget.type) return false;
-  if (KNOWN_CANVAS_NATIVE_WIDGET_TYPES.has(widget.type)) return false;
-  const looksInternal = widget.type.startsWith("$$") || /preview/i.test(widget.type);
-  return looksInternal;
+  const type = widget.type;
+  if (typeof type !== "string" || !type || NATIVE_WIDGET_TYPES.has(type)) return false;
+  return type.startsWith("$$") || /preview/i.test(type);
 }
 
-function getPseudoWidgetText(widget) {
-  if (typeof widget.value === "string") return widget.value;
-  if (Array.isArray(widget.value)) {
-    // Some nodes store the display string as the sole element of a
-    // tuple/array (mirrors the Python side's `{"ui": {"text": (value,)}}`).
-    const first = widget.value[0];
-    if (typeof first === "string") return first;
-  }
-  if (widget.value != null) return String(widget.value);
-  return "";
-}
-
-// Only textarea / text-like input elements represent an editable text
-// value worth rendering; other DOM widgets (audio players, upload
-// buttons, etc.) are skipped rather than drawn as an empty placeholder.
 function isTextLikeElement(el) {
-  if (!el || typeof el.tagName !== "string") return false;
-  const tag = el.tagName.toLowerCase();
+  const tag = el?.tagName?.toLowerCase();
   if (tag === "textarea") return true;
-  if (tag === "input") {
-    const inputType = (el.type || "text").toLowerCase();
-    return inputType === "text" || inputType === "search" || inputType === "url";
-  }
-  return false;
+  if (tag !== "input") return false;
+  return ["text", "search", "url"].includes((el.type || "text").toLowerCase());
 }
 
-function getWidgetText(widget) {
-  if (widget.inputEl && typeof widget.inputEl.value === "string") return widget.inputEl.value;
-  if (widget.element && typeof widget.element.value === "string") return widget.element.value;
-  if (typeof widget.value === "string") return widget.value;
-  if (widget.value != null) return String(widget.value);
-  return "";
+function getWidgetText(widget, isPseudo) {
+  if (!isPseudo) {
+    const el = widget.inputEl || widget.element;
+    if (typeof el?.value === "string") return el.value;
+  }
+  const v = isPseudo && Array.isArray(widget.value) ? widget.value[0] : widget.value;
+  return v == null ? "" : String(v);
 }
 
 function wrapText(ctx, text, maxWidth) {
   const lines = [];
-  const rawLines = String(text).split(/\r\n|\r|\n/);
-  for (const rawLine of rawLines) {
-    if (rawLine === "") {
-      lines.push("");
-      continue;
-    }
+  for (const rawLine of String(text).split(/\r\n|\r|\n/)) {
     let current = "";
     for (const word of rawLine.split(" ")) {
       const candidate = current ? current + " " + word : word;
-      if (ctx.measureText(candidate).width > maxWidth && current) {
+      if (current && ctx.measureText(candidate).width > maxWidth) {
         lines.push(current);
         current = word;
       } else {
         current = candidate;
       }
     }
-    if (current) lines.push(current);
+    lines.push(current);
   }
   return lines;
 }
 
-// A widget is link-driven (its real value comes from a connected input,
-// not from the widget itself) if there's an input slot with the same
-// name that has an active link.
-function isWidgetHidden(widget, node) {
-  if (!widget) return true;
-  if (!Array.isArray(node.inputs)) return false;
-  return node.inputs.some((inp) => inp && inp.name === widget.name && inp.link != null);
-}
+const isLinkDriven = (widget, node) =>
+  Array.isArray(node.inputs) && node.inputs.some((i) => i && i.name === widget.name && i.link != null);
 
-function drawDomWidgetFallback(ctx, node, widget, widgetWidth, y, height) {
+function drawDomWidgetFallback(ctx, widget, widgetWidth, y, height) {
   const el = widget.inputEl || widget.element;
-  const isPseudo = isTextPreviewPseudoWidget(widget);
+  const isPseudo = isPreviewPseudoWidget(widget);
+  const text = getWidgetText(widget, isPseudo);
 
-  if (isWidgetHidden(widget, node)) return;
-  if (!isPseudo && !isTextLikeElement(el)) return;
+  const margin = 8, padX = 6, padY = 6, lineHeight = 14;
+  const maxWidth = widgetWidth - margin * 2 - padX * 2;
+  ctx.font = "12px Arial";
 
-  const text = isPseudo ? getPseudoWidgetText(widget) : getWidgetText(widget);
-
-  // The `height` litegraph passes into draw() for a DOM widget is only
-  // its internal placeholder/layout height, not the actual rendered size
-  // of the textarea (which is sized by CSS, independent of litegraph's
-  // canvas layout). Using that placeholder height here under-counts
-  // maxLines and silently clips multi-line text down to (often) a single
-  // line. The textarea's own rendered box is the source of truth for how
-  // tall this widget actually looks on screen, so prefer that.
   let boxHeight = height;
   if (el) {
-    if (typeof el.getBoundingClientRect === "function") {
-      const rect = el.getBoundingClientRect();
-      if (rect.height > boxHeight) boxHeight = rect.height;
-    }
-    if (typeof el.offsetHeight === "number" && el.offsetHeight > boxHeight) {
-      boxHeight = el.offsetHeight;
-    }
-    if (typeof el.scrollHeight === "number" && el.scrollHeight > boxHeight) {
-      boxHeight = el.scrollHeight;
-    }
-  } else if (isPseudo) {
-    // No backing element to measure; estimate height from the text
-    // itself so multi-line preview values aren't clipped to one line.
-    const padY = 6;
-    const lineHeight = 14;
-    const maxWidth = widgetWidth - 8 * 2 - 6 * 2;
-    ctx.font = "12px Arial";
-    const estimatedLines = wrapText(ctx, text || "", maxWidth).length || 1;
-    const estimatedHeight = estimatedLines * lineHeight + padY * 2;
-    if (estimatedHeight > boxHeight) boxHeight = estimatedHeight;
+    boxHeight = Math.max(
+      boxHeight,
+      el.getBoundingClientRect?.().height || 0,
+      el.offsetHeight || 0,
+      el.scrollHeight || 0
+    );
+  } else {
+    boxHeight = Math.max(boxHeight, wrapText(ctx, text, maxWidth).length * lineHeight + padY * 2);
   }
-
-  const margin = 8;
 
   ctx.save();
   ctx.beginPath();
-  const radius = 4;
-  if (ctx.roundRect) {
-    ctx.roundRect(margin, y, widgetWidth - margin * 2, boxHeight, radius);
-  } else {
-    ctx.rect(margin, y, widgetWidth - margin * 2, boxHeight);
-  }
+  if (ctx.roundRect) ctx.roundRect(margin, y, widgetWidth - margin * 2, boxHeight, 4);
+  else ctx.rect(margin, y, widgetWidth - margin * 2, boxHeight);
   ctx.fillStyle = "#1a1a1a";
   ctx.fill();
   ctx.strokeStyle = "#4a4a4a";
   ctx.lineWidth = 1;
   ctx.stroke();
-
   ctx.clip();
+
   ctx.fillStyle = text ? "#dddddd" : "#777777";
-  ctx.font = "12px Arial";
   ctx.textBaseline = "top";
   ctx.textAlign = "left";
-
-  const padX = 6;
-  const padY = 6;
-  const lineHeight = 14;
-  const maxWidth = widgetWidth - margin * 2 - padX * 2;
-  const lines = wrapText(ctx, text || "", maxWidth);
+  const lines = wrapText(ctx, text, maxWidth);
   const maxLines = Math.max(1, Math.floor((boxHeight - padY * 2) / lineHeight));
-
   for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
     ctx.fillText(lines[i], margin + padX, y + padY + i * lineHeight);
   }
-
   ctx.restore();
 }
 
-// Collects the DOM-backed (and pseudo-DOM) text widgets that need a
-// manual fallback paint for this export. litegraph's normal draw() pass
-// leaves DOM widgets blank on canvas but still records each one's
-// on-screen position via `widget.last_y`; we read that back afterwards
-// rather than patching any widget's draw() method.
-function collectDomWidgetsToRender() {
-  const targets = [];
+function drawDomWidgetFallbacks(ctx) {
+  const [ox, oy] = app.canvas?.ds?.offset || [0, 0];
 
   for (const node of app.graph._nodes) {
     if (!node.widgets || node.flags?.collapsed) continue;
-    for (const widget of node.widgets) {
-      const isPseudo = isTextPreviewPseudoWidget(widget);
-      if (!isDomWidget(widget) && !isPseudo) continue;
-      if (isWidgetHidden(widget, node)) continue;
-
-      const el = widget.inputEl || widget.element;
-      if (!isPseudo && !isTextLikeElement(el)) continue;
-      if (typeof widget.last_y !== "number") continue;
-
-      targets.push({ node, widget });
-    }
-  }
-
-  return targets;
-}
-
-// Paints the fallback box for each collected widget directly, using
-// litegraph's own recorded layout (widget.last_y, node.size) for
-// position and width. Runs after the normal lgCanvas.draw() pass, as a
-// pure additional paint step -- it never reads or writes widget.draw.
-function drawDomWidgetFallbacks(ctx, targets) {
-  // litegraph's draw() positions each node via ds.offset (graph pan, set
-  // in updateView()) plus a per-node translate to node.pos; widget.last_y
-  // is recorded relative to both. Both transforms are undone by the time
-  // draw() returns, so we reapply them here. ds.scale is left out: the
-  // exporter pins it to 1 and scales via ctx.setTransform() instead.
-  const dsOffset = app.canvas?.ds?.offset || [0, 0];
-
-  // Use the gap to the next widget on the same node (by last_y order) as
-  // a layout-height estimate; drawDomWidgetFallback() refines this using
-  // the element's actual rendered size when available.
-  for (const { node, widget } of targets) {
-    const siblings = (node.widgets || [])
+    const laidOut = node.widgets
       .filter((w) => typeof w.last_y === "number")
       .sort((a, b) => a.last_y - b.last_y);
-    const idx = siblings.indexOf(widget);
-    const next = idx >= 0 ? siblings[idx + 1] : null;
-    const fallbackGap = next ? next.last_y - widget.last_y : 24;
-    const height = Math.max(20, fallbackGap - 4);
 
-    const widgetWidth = node.size[0];
-    const y = widget.last_y;
+    for (const widget of laidOut) {
+      const isPseudo = isPreviewPseudoWidget(widget);
+      if (!widget.element && !isPseudo) continue;
+      if (isLinkDriven(widget, node)) continue;
+      if (!isPseudo && !isTextLikeElement(widget.inputEl || widget.element)) continue;
 
-    ctx.save();
-    ctx.translate(dsOffset[0], dsOffset[1]);
-    ctx.translate(node.pos[0], node.pos[1]);
-    drawDomWidgetFallback(ctx, node, widget, widgetWidth, y, height);
-    ctx.restore();
+      const next = laidOut[laidOut.indexOf(widget) + 1];
+      const height = Math.max(20, (next ? next.last_y - widget.last_y : 24) - 4);
+
+      ctx.save();
+      ctx.translate(ox, oy);
+      ctx.translate(node.pos[0], node.pos[1]);
+      drawDomWidgetFallback(ctx, widget, node.size[0], widget.last_y, height);
+      ctx.restore();
+    }
   }
 }
 
 class EasygoingPngWorkflowImage {
-  extension = "png";
-
   static HIRES_SCALE = 4;
   static MAX_CANVAS_DIMENSION = 16000;
   static MAX_CANVAS_PIXELS = 250_000_000;
@@ -280,158 +147,208 @@ class EasygoingPngWorkflowImage {
   getBounds() {
     const bounds = app.graph._nodes.reduce(
       (p, n) => {
-        if (n.pos[0] < p[0]) p[0] = n.pos[0];
-        if (n.pos[1] < p[1]) p[1] = n.pos[1];
         const b = typeof n.getBounding === "function" ? n.getBounding() : [0, 0, n.size[0], n.size[1]];
-        const r = n.pos[0] + b[2];
-        const bo = n.pos[1] + b[3];
-        if (r > p[2]) p[2] = r;
-        if (bo > p[3]) p[3] = bo;
+        p[0] = Math.min(p[0], n.pos[0]);
+        p[1] = Math.min(p[1], n.pos[1]);
+        p[2] = Math.max(p[2], n.pos[0] + b[2]);
+        p[3] = Math.max(p[3], n.pos[1] + b[3]);
         return p;
       },
       [99999, 99999, -99999, -99999]
     );
-
-    // Margin so links don't get clipped at the edges
     bounds[0] -= 50;
     bounds[1] -= 80;
     bounds[2] += 50;
     bounds[3] += 20;
-
     return bounds;
   }
 
-  // Clamp scale so the canvas doesn't exceed browser pixel limits
   computeSafeScale(bounds, targetScale) {
     const w = bounds[2] - bounds[0];
     const h = bounds[3] - bounds[1];
-
-    const dimLimit = EasygoingPngWorkflowImage.MAX_CANVAS_DIMENSION;
-    const pxLimit = EasygoingPngWorkflowImage.MAX_CANVAS_PIXELS;
-
-    const dimScaleLimit = Math.min(dimLimit / w, dimLimit / h);
-    const pxScaleLimit = Math.sqrt(pxLimit / (w * h));
-
-    const scale = Math.min(targetScale, dimScaleLimit, pxScaleLimit);
-    return Math.max(scale, 1);
+    const { MAX_CANVAS_DIMENSION: dim, MAX_CANVAS_PIXELS: px } = EasygoingPngWorkflowImage;
+    return Math.max(Math.min(targetScale, dim / w, dim / h, Math.sqrt(px / (w * h))), 1);
   }
 
-  // Real (but offscreen) canvas, so litegraph's DOM-dependent calculations
-  // (getBoundingClientRect etc.) still work correctly.
-  createVirtualCanvas(pixelWidth, pixelHeight) {
+  createVirtualCanvas(width, height) {
     const canvas = document.createElement("canvas");
-    canvas.width = pixelWidth;
-    canvas.height = pixelHeight;
-
-    canvas.style.width = pixelWidth + "px";
-    canvas.style.height = pixelHeight + "px";
-    canvas.style.position = "fixed";
-    canvas.style.top = "0px";
-    canvas.style.left = "-999999px";
-    canvas.style.pointerEvents = "none";
-    canvas.style.zIndex = "-1";
-
+    canvas.width = width;
+    canvas.height = height;
+    Object.assign(canvas.style, {
+      width: width + "px",
+      height: height + "px",
+      position: "fixed",
+      top: "0px",
+      left: "-999999px",
+      pointerEvents: "none",
+      zIndex: "-1",
+    });
     document.body.appendChild(canvas);
     this._virtualCanvasEl = canvas;
-
     return canvas;
   }
 
   removeVirtualCanvas() {
-    if (this._virtualCanvasEl && this._virtualCanvasEl.parentNode) {
-      this._virtualCanvasEl.parentNode.removeChild(this._virtualCanvasEl);
-    }
+    this._virtualCanvasEl?.remove();
     this._virtualCanvasEl = null;
   }
 
+  // Background, links and nodes must share one canvas/context, otherwise the
+  // frontend draws links on a separate bgcanvas at the wrong scale.
   swapCanvasTarget(virtualCanvas) {
-    const lgCanvas = app.canvas;
-
-    this._originalCanvasEl = lgCanvas.canvas;
-    this._originalCtx = lgCanvas.ctx;
-    this._originalDsElement = lgCanvas.ds.element;
-
+    const lg = app.canvas;
+    this._orig = {
+      canvas: lg.canvas,
+      ctx: lg.ctx,
+      dsElement: lg.ds.element,
+      bgcanvas: lg.bgcanvas,
+      bgctx: lg.bgctx,
+    };
     const vctx = virtualCanvas.getContext("2d");
-
-    lgCanvas.canvas = virtualCanvas;
-    lgCanvas.ctx = vctx;
-    lgCanvas.ds.element = virtualCanvas;
-
-    return vctx;
+    lg.canvas = virtualCanvas;
+    lg.ctx = vctx;
+    lg.ds.element = virtualCanvas;
+    lg.bgcanvas = virtualCanvas;
+    lg.bgctx = vctx;
   }
 
   restoreCanvasTarget() {
-    const lgCanvas = app.canvas;
-    lgCanvas.canvas = this._originalCanvasEl;
-    lgCanvas.ctx = this._originalCtx;
-    lgCanvas.ds.element = this._originalDsElement;
-    this._originalCanvasEl = null;
-    this._originalCtx = null;
-    this._originalDsElement = null;
+    const lg = app.canvas;
+    const o = this._orig;
+    if (!o) return;
+    lg.canvas = o.canvas;
+    lg.ctx = o.ctx;
+    lg.ds.element = o.dsElement;
+    lg.bgcanvas = o.bgcanvas;
+    lg.bgctx = o.bgctx;
+    this._orig = null;
+  }
+
+  // Pin the visible area to the export bounds so nothing is culled.
+  installRenderAllPatch(bounds, pixelWidth, pixelHeight) {
+    const lg = app.canvas;
+    const ds = lg.ds;
+    this._restoreFns = [];
+
+    const override = (obj, key, value) => {
+      const ownDesc = Object.getOwnPropertyDescriptor(obj, key);
+      try {
+        Object.defineProperty(obj, key, {
+          value,
+          writable: true,
+          configurable: true,
+          enumerable: ownDesc ? ownDesc.enumerable : false,
+        });
+      } catch (e) {
+        console.warn(`[WorkflowImageExport] could not override ${key}`, e);
+        return;
+      }
+      this._restoreFns.push(() => {
+        try {
+          if (ownDesc) Object.defineProperty(obj, key, ownDesc);
+          else delete obj[key];
+        } catch (e) {
+          console.warn(`[WorkflowImageExport] could not restore ${key}`, e);
+        }
+      });
+    };
+
+    const setVisibleArea = (target) => {
+      const va = target?.visible_area;
+      if (!va) return;
+      va[0] = bounds[0];
+      va[1] = bounds[1];
+      va[2] = bounds[2] - bounds[0];
+      va[3] = bounds[3] - bounds[1];
+    };
+
+    override(ds, "computeVisibleArea", function () {
+      setVisibleArea(this);
+    });
+    setVisibleArea(ds);
+
+    override(lg, "computeVisibleNodes", function (nodes, out) {
+      const result = out || [];
+      result.length = 0;
+      for (const node of nodes || this.graph?._nodes || app.graph._nodes) {
+        node.updateArea?.();
+        result.push(node);
+      }
+      return result;
+    });
+    lg.visible_nodes = app.graph._nodes.slice();
+
+    // A viewport also stops the frontend from resetting the context transform.
+    this._origViewport = lg.viewport;
+    try {
+      lg.viewport = [0, 0, pixelWidth, pixelHeight];
+    } catch (e) {}
+  }
+
+  uninstallRenderAllPatch() {
+    for (const fn of (this._restoreFns || []).reverse()) fn();
+    this._restoreFns = null;
+    try {
+      app.canvas.viewport = this._origViewport;
+    } catch (e) {}
+    this._origViewport = undefined;
   }
 
   saveState() {
-    const lgCanvas = app.canvas;
+    const lg = app.canvas;
     this.state = {
-      scale: lgCanvas.ds.scale,
-      offsetX: lgCanvas.ds.offset[0],
-      offsetY: lgCanvas.ds.offset[1],
-      clearBackground: lgCanvas.clear_background,
-      clearBackgroundColor: lgCanvas.clear_background_color,
-      backgroundImage: lgCanvas.background_image,
-      transform: lgCanvas.ctx?.getTransform ? lgCanvas.ctx.getTransform() : null,
+      scale: lg.ds.scale,
+      offsetX: lg.ds.offset[0],
+      offsetY: lg.ds.offset[1],
+      clearBackground: lg.clear_background,
+      clearBackgroundColor: lg.clear_background_color,
+      backgroundImage: lg.background_image,
+      transform: lg.ctx?.getTransform?.() ?? null,
     };
   }
 
   restoreState() {
-    const lgCanvas = app.canvas;
-    lgCanvas.ds.scale = this.state.scale;
-    lgCanvas.ds.offset[0] = this.state.offsetX;
-    lgCanvas.ds.offset[1] = this.state.offsetY;
-    lgCanvas.clear_background = this.state.clearBackground;
-    lgCanvas.clear_background_color = this.state.clearBackgroundColor;
-    lgCanvas.background_image = this.state.backgroundImage;
-    if (this.state.transform && lgCanvas.ctx?.setTransform) {
-      lgCanvas.ctx.setTransform(this.state.transform);
-    }
-    lgCanvas.dirty_canvas = true;
-    lgCanvas.dirty_bgcanvas = true;
+    const lg = app.canvas;
+    const s = this.state;
+    lg.ds.scale = s.scale;
+    lg.ds.offset[0] = s.offsetX;
+    lg.ds.offset[1] = s.offsetY;
+    lg.clear_background = s.clearBackground;
+    lg.clear_background_color = s.clearBackgroundColor;
+    lg.background_image = s.backgroundImage;
+    if (s.transform) lg.ctx?.setTransform?.(s.transform);
+    lg.dirty_canvas = true;
+    lg.dirty_bgcanvas = true;
   }
 
   setBackgroundFill() {
-    const lgCanvas = app.canvas;
-    lgCanvas.clear_background = true;
+    const lg = app.canvas;
     const bgColor =
       this.state.clearBackgroundColor ||
       window.getComputedStyle(document.body).getPropertyValue("--bg-color").trim() ||
       "#202020";
-    lgCanvas.clear_background_color = bgColor;
-    lgCanvas.background_image = null;
-    lgCanvas._pattern = null;
+    lg.clear_background = true;
+    lg.clear_background_color = bgColor;
+    lg.background_image = null;
+    lg._pattern = null;
     this._bgColor = bgColor;
   }
 
-  // ds.scale stays at 1; upscaling happens only via ctx.setTransform.
+  // ds.scale stays 1; upscaling is done only via ctx.setTransform.
   updateView(bounds, scale) {
-    const lgCanvas = app.canvas;
-
-    lgCanvas.ds.scale = 1;
-    lgCanvas.ds.offset[0] = -bounds[0];
-    lgCanvas.ds.offset[1] = -bounds[1];
-
-    if (lgCanvas.ctx?.setTransform) {
-      lgCanvas.ctx.setTransform(scale, 0, 0, scale, 0, 0);
-    }
-
-    lgCanvas.dirty_canvas = true;
-    lgCanvas.dirty_bgcanvas = true;
+    const lg = app.canvas;
+    lg.ds.scale = 1;
+    lg.ds.offset[0] = -bounds[0];
+    lg.ds.offset[1] = -bounds[1];
+    lg.ctx?.setTransform?.(scale, 0, 0, scale, 0, 0);
+    lg.dirty_canvas = true;
+    lg.dirty_bgcanvas = true;
   }
 
   async drawAndSettle(virtualCanvas) {
     await waitForNodeImages();
 
-    const lgCanvas = app.canvas;
-    const ctx = lgCanvas.ctx;
+    const ctx = app.canvas.ctx;
     if (ctx) {
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -439,13 +356,8 @@ class EasygoingPngWorkflowImage {
       ctx.restore();
     }
 
-    // DOM-backed widgets live outside the canvas and won't be captured
-    // by draw(); paint a fallback box for them afterwards.
-    lgCanvas.draw(true, true);
-    const domWidgetTargets = collectDomWidgetsToRender();
-    if (domWidgetTargets.length && ctx) {
-      drawDomWidgetFallbacks(ctx, domWidgetTargets);
-    }
+    app.canvas.draw(true, true);
+    if (ctx) drawDomWidgetFallbacks(ctx);
 
     await nextFrame();
     await nextFrame();
@@ -458,12 +370,12 @@ class EasygoingPngWorkflowImage {
     const scale = this.computeSafeScale(bounds, targetScale);
     const w = Math.ceil((bounds[2] - bounds[0]) * scale);
     const h = Math.ceil((bounds[3] - bounds[1]) * scale);
-
     const virtualCanvas = this.createVirtualCanvas(w, h);
 
     try {
       this.swapCanvasTarget(virtualCanvas);
       this.setBackgroundFill();
+      this.installRenderAllPatch(bounds, w, h);
       this.updateView(bounds, scale);
 
       await this.drawAndSettle(virtualCanvas);
@@ -472,9 +384,9 @@ class EasygoingPngWorkflowImage {
         virtualCanvas,
         includeWorkflow ? JSON.stringify(app.graph.serialize()) : undefined
       );
-
       this.download(blob);
     } finally {
+      this.uninstallRenderAllPatch();
       this.restoreCanvasTarget();
       this.restoreState();
       this.removeVirtualCanvas();
@@ -485,16 +397,12 @@ class EasygoingPngWorkflowImage {
   download(blob) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    Object.assign(a, {
-      href: url,
-      download: "workflow." + this.extension,
-      style: "display: none",
-    });
+    Object.assign(a, { href: url, download: "workflow.png", style: "display: none" });
     document.body.append(a);
     a.click();
-    setTimeout(function () {
+    setTimeout(() => {
       a.remove();
-      window.URL.revokeObjectURL(url);
+      URL.revokeObjectURL(url);
     }, 0);
   }
 
@@ -503,107 +411,71 @@ class EasygoingPngWorkflowImage {
   }
 
   joinArrayBuffer(...bufs) {
-    const result = new Uint8Array(bufs.reduce((totalSize, buf) => totalSize + buf.byteLength, 0));
-    bufs.reduce((offset, buf) => {
+    const result = new Uint8Array(bufs.reduce((total, buf) => total + buf.byteLength, 0));
+    let offset = 0;
+    for (const buf of bufs) {
       result.set(buf, offset);
-      return offset + buf.byteLength;
-    }, 0);
+      offset += buf.byteLength;
+    }
     return result;
   }
 
   crc32(data) {
-    const crcTable =
+    const table =
       EasygoingPngWorkflowImage.crcTable ||
-      (EasygoingPngWorkflowImage.crcTable = (() => {
-        let c;
-        const crcTable = [];
-        for (let n = 0; n < 256; n++) {
-          c = n;
-          for (let k = 0; k < 8; k++) {
-            c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-          }
-          crcTable[n] = c;
-        }
-        return crcTable;
-      })());
-
-    let crc = 0 ^ -1;
+      (EasygoingPngWorkflowImage.crcTable = Array.from({ length: 256 }, (_, n) => {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        return c;
+      }));
+    let crc = -1;
     for (let i = 0; i < data.byteLength; i++) {
-      crc = (crc >>> 8) ^ crcTable[(crc ^ data[i]) & 0xff];
+      crc = (crc >>> 8) ^ table[(crc ^ data[i]) & 0xff];
     }
     return (crc ^ -1) >>> 0;
   }
 
-  async canvasToBlob(canvas) {
-    return new Promise((resolve) => {
-      canvas.toBlob((blob) => resolve(blob), "image/png");
-    });
-  }
-
   async getBlob(virtualCanvas, workflow) {
-    // Composite onto an opaque background to avoid transparency
-    const bgColor = this._bgColor || "#202020";
-
-    const compositeCanvas = document.createElement("canvas");
-    compositeCanvas.width = virtualCanvas.width;
-    compositeCanvas.height = virtualCanvas.height;
-    const ctx = compositeCanvas.getContext("2d");
-
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, compositeCanvas.width, compositeCanvas.height);
+    const composite = document.createElement("canvas");
+    composite.width = virtualCanvas.width;
+    composite.height = virtualCanvas.height;
+    const ctx = composite.getContext("2d");
+    ctx.fillStyle = this._bgColor || "#202020";
+    ctx.fillRect(0, 0, composite.width, composite.height);
     ctx.drawImage(virtualCanvas, 0, 0);
 
-    let blob = await this.canvasToBlob(compositeCanvas);
+    let blob = await new Promise((resolve) => composite.toBlob(resolve, "image/png"));
 
     if (workflow) {
       const buffer = await blob.arrayBuffer();
-      const typedArr = new Uint8Array(buffer);
-      const view = new DataView(buffer);
+      const png = new Uint8Array(buffer);
       const data = new TextEncoder().encode(`tEXtworkflow\0${workflow}`);
       const chunk = this.joinArrayBuffer(this.n2b(data.byteLength - 4), data, this.n2b(this.crc32(data)));
-      const sz = view.getUint32(8) + 20;
-      const result = this.joinArrayBuffer(typedArr.subarray(0, sz), chunk, typedArr.subarray(sz));
-      blob = new Blob([result], { type: "image/png" });
+      const sz = new DataView(buffer).getUint32(8) + 20;
+      blob = new Blob([this.joinArrayBuffer(png.subarray(0, sz), chunk, png.subarray(sz))], {
+        type: "image/png",
+      });
     }
-
     return blob;
   }
 }
 
 app.registerExtension({
   name: "easygoing.WorkflowImageExport",
-  setup() {
-    // Add a menu entry by wrapping getCanvasMenuOptions on the shared
-    // prototype, always calling through to the original implementation.
-    if (typeof LGraphCanvas?.prototype?.getCanvasMenuOptions !== "function") {
-      console.warn("[WorkflowImageExport] LGraphCanvas.getCanvasMenuOptions not found; menu entry not added.");
-      return;
-    }
-    const orig = LGraphCanvas.prototype.getCanvasMenuOptions;
-    LGraphCanvas.prototype.getCanvasMenuOptions = function () {
-      const options = orig.apply(this, arguments);
-
-      options.push(null, {
+  getCanvasMenuItems() {
+    const scale = EasygoingPngWorkflowImage.HIRES_SCALE;
+    const run = (embed) => () => new EasygoingPngWorkflowImage().export(embed, scale);
+    return [
+      null,
+      {
         content: "Workflow Image",
         submenu: {
           options: [
-            {
-              content: `Export PNG (embedded workflow, Hires x${EasygoingPngWorkflowImage.HIRES_SCALE})`,
-              callback: () => {
-                new EasygoingPngWorkflowImage().export(true, EasygoingPngWorkflowImage.HIRES_SCALE);
-              },
-            },
-            {
-              content: `Export PNG (no embedded workflow, Hires x${EasygoingPngWorkflowImage.HIRES_SCALE})`,
-              callback: () => {
-                new EasygoingPngWorkflowImage().export(false, EasygoingPngWorkflowImage.HIRES_SCALE);
-              },
-            },
+            { content: `Export PNG (embedded workflow, Hires x${scale})`, callback: run(true) },
+            { content: `Export PNG (no embedded workflow, Hires x${scale})`, callback: run(false) },
           ],
         },
-      });
-
-      return options;
-    };
+      },
+    ];
   },
 });
