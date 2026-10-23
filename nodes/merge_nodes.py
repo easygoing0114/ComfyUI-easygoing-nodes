@@ -292,6 +292,18 @@ _HIDREAM_O1_LAYER_KEYS = [
     "visual.merger.", "visual.deepstack_merger_list.", "visual.patch_embed.", "visual.pos_embed.",
 ]
 
+# MOSS Image (moss_image_sft_bf16.safetensors)
+#   - layers.0-41: 42 blocks (qkv / o / ffn_up_gate / ffn_down / norm / q_norm / k_norm)
+#   - text_embedder: blocks.0-1 + proj
+#   - rope.bands (F32 constant buffer) is intentionally not scalable.
+_MOSS_IMAGE_LAYER_KEYS = [
+    "video_embedder.", "time_embedding.", "text_embedder.proj.",
+    *numbered_keys("text_embedder.blocks.", 2),
+    "shared_block_modulation.",
+    *numbered_keys("layers.", 42),
+    "video_head_modulation.", "final_norm_video.", "final_linear_video.",
+]
+
 _CLIP_SDXL_LAYER_KEYS = [
     "clip_l.embeddings",
     *numbered_keys("clip_l.encoder.layers.", 12, suffix=""),
@@ -613,6 +625,31 @@ class ModelScaleErnieImage(io.ComfyNode):
             display_name="Model Scale ERNIE Image",
             category="advanced/model_merging/model_specific",
             inputs=build_scale_inputs(_ERNIE_IMAGE_LAYER_KEYS, "model", io.Model),
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model, **kwargs) -> io.NodeOutput:
+        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
+
+
+# ------------------------------------------------------------------------------
+# Node: Model Scale MOSS Image
+# ------------------------------------------------------------------------------
+
+class ModelScaleMossImage(io.ComfyNode):
+    """Scale MOSS Image model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelScaleMossImage",
+            display_name="Model Scale MOSS Image",
+            category="advanced/model_merging/model_specific",
+            description="Scale specific layers of MOSS Image models. "
+                        "Assumes layers 0-41 and text_embedder.blocks 0-1. "
+                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
+            inputs=build_scale_inputs(_MOSS_IMAGE_LAYER_KEYS, "model", io.Model),
             outputs=single_output(io.Model),
         )
 
@@ -1099,6 +1136,7 @@ NODE_LIST = [
     ModelScaleKrea2,
     ModelScaleFlux2Klein,
     ModelScaleErnieImage,
+    ModelScaleMossImage,
     ModelScaleHiDreamO1Image,
     CLIPScaleDualSDXLBlock,
     CLIPScaleQwenBlock,
