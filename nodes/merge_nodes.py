@@ -21,9 +21,9 @@ _SCALE_ARG = dict(default=1.0, min=0.0, max=2.0, step=0.01)
 _RATIO_ARG = dict(default=1.0, min=0.0, max=1.0, step=0.01)
 
 
-def longest_prefix_match(key: str, ratios: dict) -> float:
-    """Return the value whose key is the longest prefix of `key`. Default 1.0."""
-    best_value = 1.0
+def longest_prefix_match(key: str, ratios: dict, default: float = 1.0) -> float:
+    """Return the value whose key is the longest prefix of `key`. `default` if none match."""
+    best_value = default
     best_len = 0
     for prefix, value in ratios.items():
         if key.startswith(prefix) and len(prefix) > best_len:
@@ -724,6 +724,89 @@ class ModelScaleHiDreamO1Image(io.ComfyNode):
 
 
 # ------------------------------------------------------------------------------
+# Node: Model Merge HiDream-O1-Image
+# ------------------------------------------------------------------------------
+
+def _all_key_patches(patcher) -> dict:
+    """get_key_patches() for every key, tolerating signatures that require a prefix arg."""
+    try:
+        return patcher.get_key_patches()
+    except TypeError:
+        return patcher.get_key_patches("")
+
+
+def _detect_key_prefix(key_patches: dict) -> str:
+    """Return the first known diffusion-model prefix present in `key_patches`, else ''."""
+    for candidate in ("diffusion_model.", "model."):
+        if any(k.startswith(candidate) for k in key_patches):
+            return candidate
+    return ""
+
+
+class ModelMergeHiDreamO1Image(io.ComfyNode):
+    """Block-wise merge for HiDream-O1-Image (UiT architecture).
+    ratio=0.0 keeps model1, ratio=1.0 uses model2.
+    Uses ModelPatcher clone/patch — no deepcopy, no in-place mutation."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="EasygoingNodes_ModelMergeHiDreamO1Image",
+            display_name="Model Merge HiDream-O1-Image",
+            category="HiDream O1",
+            description="Block-wise merge of two HiDream-O1-Image (UiT architecture) models. "
+                        "ratio=0.0 keeps model1 | ratio=1.0 uses model2. "
+                        "Weights not covered by any listed prefix are kept from model1.",
+            inputs=[
+                io.Model.Input("model1"),
+                io.Model.Input("model2"),
+                *[io.Float.Input(key, **_RATIO_ARG) for key in _HIDREAM_O1_LAYER_KEYS],
+            ],
+            outputs=single_output(io.Model),
+        )
+
+    @classmethod
+    def execute(cls, model1, model2, **kwargs) -> io.NodeOutput:
+        ratios = restore_layer_keys(kwargs, _HIDREAM_O1_LAYER_KEYS)
+
+        patcher1 = getattr(model1, "patcher", model1)
+        patcher2 = getattr(model2, "patcher", model2)
+        m = patcher1.clone()
+
+        kp1 = _all_key_patches(m)
+        kp2 = _all_key_patches(patcher2)
+        if not kp1 or not kp2:
+            LOGGER.warning("ModelMergeHiDreamO1Image: get_key_patches() returned empty dict.")
+            return io.NodeOutput(model1)
+
+        # Detect the active key prefix from model1 and apply it to both models.
+        prefix = _detect_key_prefix(kp1)
+
+        modified = 0
+        for key, patch in kp2.items():
+            if prefix and not key.startswith(prefix):
+                continue
+            # Unmatched keys default to 0.0 (keep model1) so uncovered weights are never swapped.
+            ratio = longest_prefix_match(key[len(prefix):], ratios, default=0.0)
+            if ratio == 0.0:
+                continue
+            m.add_patches({key: patch}, 1.0 - ratio, ratio)
+            modified += 1
+
+        if modified == 0:
+            LOGGER.info("ModelMergeHiDreamO1Image: nothing to merge (all ratios 0.0 or no matching keys).")
+            return io.NodeOutput(model1)
+
+        LOGGER.info("ModelMergeHiDreamO1Image: merged %d keys (prefix=%r).", modified, prefix)
+
+        try:
+            result = model1.clone_with_patcher(m)
+        except (AttributeError, TypeError):
+            result = m
+        return io.NodeOutput(result)
+
+
+# ------------------------------------------------------------------------------
 # Node: CLIP Scale Dual SDXL Block
 # ------------------------------------------------------------------------------
 
@@ -1138,6 +1221,7 @@ NODE_LIST = [
     ModelScaleErnieImage,
     ModelScaleMossImage,
     ModelScaleHiDreamO1Image,
+    ModelMergeHiDreamO1Image,
     CLIPScaleDualSDXLBlock,
     CLIPScaleQwenBlock,
     CLIPSaveQwen,
