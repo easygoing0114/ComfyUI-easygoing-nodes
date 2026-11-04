@@ -37,7 +37,7 @@ except ImportError as e:
     NODE_LIST = []
 
 # Web extension definition.
-WEB_DIRECTORY = "./web"
+WEB_DIRECTORY = "./js"
 
 if V3_AVAILABLE:
     __all__ = [

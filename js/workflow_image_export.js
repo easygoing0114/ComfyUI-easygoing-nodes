@@ -1,4 +1,4 @@
-import { app } from "../../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 
 const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
 
@@ -140,7 +140,7 @@ function drawDomWidgetFallbacks(ctx) {
 }
 
 class EasygoingPngWorkflowImage {
-  static HIRES_SCALE = 4;
+  static EXPORT_SCALES = [1, 2, 4];
   static MAX_CANVAS_DIMENSION = 16000;
   static MAX_CANVAS_PIXELS = 250_000_000;
 
@@ -463,18 +463,22 @@ class EasygoingPngWorkflowImage {
 app.registerExtension({
   name: "easygoing.WorkflowImageExport",
   getCanvasMenuItems() {
-    const scale = EasygoingPngWorkflowImage.HIRES_SCALE;
-    const run = (embed) => () => new EasygoingPngWorkflowImage().export(embed, scale);
+    const run = (embed, scale) => () => new EasygoingPngWorkflowImage().export(embed, scale);
+    const label = (scale) => (scale === 1 ? "x1" : `Hires x${scale}`);
+    const options = [];
+    for (const embed of [true, false]) {
+      for (const scale of EasygoingPngWorkflowImage.EXPORT_SCALES) {
+        options.push({
+          content: `Export PNG (${embed ? "embedded workflow" : "no embedded workflow"}, ${label(scale)})`,
+          callback: run(embed, scale),
+        });
+      }
+    }
     return [
       null,
       {
         content: "Workflow Image",
-        submenu: {
-          options: [
-            { content: `Export PNG (embedded workflow, Hires x${scale})`, callback: run(true) },
-            { content: `Export PNG (no embedded workflow, Hires x${scale})`, callback: run(false) },
-          ],
-        },
+        submenu: { options },
       },
     ];
   },
