@@ -1,8 +1,41 @@
+"""
+merge_nodes.py - block-wise scale / merge nodes for ComfyUI (V3 schema).
+
+Semantics (identical for every generated node)
+----------------------------------------------
+Scale : weight * value
+        1.0 = unchanged, 0.0 = zeroed, >1.0 = amplified
+Merge : model1 * (1 - value) + model2 * value
+        0.0 = model1, 1.0 = model2, in-between = linear blend
+        Weights that no widget covers are kept from model1.
+
+Layer widgets are matched by the longest *dot-separated prefix* of a weight key,
+so "layers.1" never captures "layers.10", and a more specific widget
+("double_blocks.0.img_attn") overrides its parent ("double_blocks.0").
+
+Layout of this file
+-------------------
+1. Helpers          prefix matching, patch / state-dict operations
+2. Layer tables     one tuple of layer prefixes per architecture
+3. Registry         Arch specs for MODEL / CLIP / VAE
+4. Node factory     builds a "Scale" and a "Merge" node for every registered Arch
+5. Other nodes      Key Name Inspector, CLIP Save Qwen, VAE arithmetic
+6. Extension entry
+
+To support a new architecture: add a layer table (use Key Name Inspector to see the
+keys) and one `Arch(...)` line in the registry. Both nodes are generated for it.
+After running a node, check the ComfyUI console: it logs how many keys were changed
+and which keys were not covered by any widget.
+"""
+
+from __future__ import annotations
+
 import json
 import logging
 import os
-
-import torch
+import re
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import comfy.sd
 import comfy.utils
@@ -11,105 +44,556 @@ from comfy.cli_args import args
 
 from comfy_api.latest import ComfyExtension, io
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("EasygoingNodes.merge")
 
-# ------------------------------------------------------------------------------
-# Shared helpers
-# ------------------------------------------------------------------------------
+CATEGORY = "advanced/model_merging/model_specific"
+MODEL_PREFIX = "diffusion_model."
 
 _SCALE_ARG = dict(default=1.0, min=0.0, max=2.0, step=0.01)
-_RATIO_ARG = dict(default=1.0, min=0.0, max=1.0, step=0.01)
+_MERGE_ARG = dict(default=0.0, min=0.0, max=1.0, step=0.01)   # 0.0 = first input (model1 / clip1 / vae1)
 
 
-def longest_prefix_match(key: str, ratios: dict, default: float = 1.0) -> float:
-    """Return the value whose key is the longest prefix of `key`. `default` if none match."""
-    best_value = default
-    best_len = 0
-    for prefix, value in ratios.items():
-        if key.startswith(prefix) and len(prefix) > best_len:
-            best_value = value
-            best_len = len(prefix)
-    return best_value
+# ==============================================================================
+# 1. Helpers
+# ==============================================================================
+
+def numbered(prefix: str, count: int, *, start: int = 0, sub: str = "") -> list[str]:
+    """numbered("layers", 2) -> ["layers.0", "layers.1"];  sub="mlp" appends ".mlp"."""
+    tail = f".{sub}" if sub else ""
+    return [f"{prefix}.{i}{tail}" for i in range(start, start + count)]
 
 
-def build_scale_inputs(layer_keys: list[str], node_input: str, node_type=io.Float, **arg) -> list:
-    """Build one widget input per layer key, plus the leading model/clip/vae input."""
-    scale_arg = arg or _SCALE_ARG
-    return [node_type.Input(node_input)] + [
-        io.Float.Input(key, **scale_arg) for key in layer_keys
-    ]
+def numbered_with_parts(prefix: str, count: int, parts: tuple[str, ...]) -> list[str]:
+    """Each numbered block followed by its named sub-modules (for finer-grained widgets)."""
+    keys = []
+    for i in range(count):
+        base = f"{prefix}.{i}"
+        keys.append(base)
+        keys.extend(f"{base}.{part}" for part in parts)
+    return keys
 
 
-def single_output(node_type, display_name: str | None = None) -> list:
-    """One output socket of the given io type (Model / Clip / Vae, ...)."""
-    return [node_type.Output(display_name=display_name)] if display_name else [node_type.Output()]
+def longest_prefix_match(name: str, ratios: dict[str, float]) -> Optional[float]:
+    """Value of the longest dot-segment prefix of `name` found in `ratios`, else None."""
+    parts = name.split(".")
+    for n in range(len(parts), 0, -1):
+        value = ratios.get(".".join(parts[:n]))
+        if value is not None:
+            return value
+    return None
 
 
-def restore_layer_keys(kwargs: dict, layer_keys: list[str]) -> dict:
-    """ComfyUI may convert '.' to '_' in widget ids; map kwargs back onto layer_keys."""
-    dotted_to_underscore = {key.replace(".", "_"): key for key in layer_keys}
-    ratios = {}
-    for k, v in kwargs.items():
-        if k in dotted_to_underscore:
-            ratios[dotted_to_underscore[k]] = v
-        elif k in layer_keys:
-            ratios[k] = v
-    return ratios
+def collect_ratios(kwargs: dict, layer_keys: tuple[str, ...]) -> dict[str, float]:
+    """Map widget values back onto layer keys.
+    ComfyUI may turn '.' into '_' in widget ids, so both spellings are accepted."""
+    ids = {}
+    for key in layer_keys:
+        ids[key] = key
+        ids[key.replace(".", "_")] = key
+    return {ids[k]: float(v) for k, v in kwargs.items() if k in ids}
 
 
-def scale_model_by_prefix(model, ratios: dict, prefix: str = "diffusion_model."):
-    """Clone `model` and multiply each weight by longest_prefix_match(key, ratios)."""
-    m = model.clone()
-    for key, patch in m.get_key_patches(prefix).items():
-        key_inner = key[len(prefix):]
-        scale = longest_prefix_match(key_inner, ratios)
-        if scale != 1.0:
-            # add_patches computes: output = weight * strength_model + patch * strength_patch.
-            # Using patch == weight itself: weight * 1.0 + weight * (scale - 1.0) = weight * scale.
-            m.add_patches({key: patch}, scale - 1.0, 1.0)
+def _key_patches(patcher, prefix: str = "") -> dict:
+    """get_key_patches() for a ModelPatcher (optionally prefix-filtered) or a CLIP."""
+    return patcher.get_key_patches(prefix) if prefix else patcher.get_key_patches()
+
+
+def _layer_name(key: str, prefix: str, normalize: Optional[Callable[[str], Optional[str]]]):
+    name = key[len(prefix):]
+    return normalize(name) if normalize is not None else name
+
+
+def _weight_shape(patch) -> Optional[tuple]:
+    """Shape of the base weight inside a get_key_patches() entry ([(weight, convert_fn), ...])."""
+    try:
+        return tuple(patch[0][0].shape)
+    except Exception:
+        return None
+
+
+def _report(label: str, total: int, changed: int, unmatched: list[str], mismatched: int = 0) -> None:
+    if total == 0 or len(unmatched) == total:
+        LOGGER.warning("%s: no key matched any layer widget (%d keys seen). "
+                       "Wrong architecture or unexpected key names?", label, total)
+        return
+    LOGGER.info("%s: changed %d / %d keys.", label, changed, total)
+    if unmatched:
+        LOGGER.info("%s: %d keys are not covered by any widget, e.g. %s",
+                    label, len(unmatched), unmatched[:5])
+    if mismatched:
+        LOGGER.warning("%s: %d keys skipped because the two models' shapes differ.",
+                       label, mismatched)
+
+
+# ---- ModelPatcher / CLIP --------------------------------------------------------
+
+def scale_patcher(patcher, ratios: dict[str, float], *, prefix: str = "",
+                  normalize=None, label: str = "Scale"):
+    """Clone `patcher` (ModelPatcher or CLIP) with each weight multiplied by its ratio."""
+    m = patcher.clone()
+    if all(v == 1.0 for v in ratios.values()):
+        return m
+
+    total = changed = 0
+    unmatched: list[str] = []
+    for key, patch in _key_patches(m, prefix).items():
+        name = _layer_name(key, prefix, normalize)
+        if name is None:
+            continue
+        total += 1
+        scale = longest_prefix_match(name, ratios)
+        if scale is None:
+            unmatched.append(name)
+            continue
+        if scale == 1.0:
+            continue
+        # add_patches computes: out = weight * strength_model + patch * strength_patch.
+        # The patch is the weight itself, so this yields weight * scale.
+        m.add_patches({key: patch}, scale - 1.0, 1.0)
+        changed += 1
+    _report(label, total, changed, unmatched)
     return m
 
 
-def scale_vae_sd(vae, ratios: dict, skip_dtypes: set = frozenset()):
-    """Return a new VAE with each tensor multiplied by longest_prefix_match(key, ratios)."""
-    sd = vae.get_sd()
-    new_sd = {}
-    for key, tensor in sd.items():
-        if tensor.dtype in skip_dtypes:
-            new_sd[key] = tensor
+def merge_patchers(patcher1, patcher2, ratios: dict[str, float], *, prefix: str = "",
+                   normalize=None, label: str = "Merge"):
+    """Clone `patcher1`, blending in `patcher2`: out = p1 * (1 - ratio) + p2 * ratio."""
+    m = patcher1.clone()
+    if not any(v != 0.0 for v in ratios.values()):
+        return m
+
+    kp1 = _key_patches(m, prefix)
+    total = changed = mismatched = 0
+    unmatched: list[str] = []
+    for key, patch in _key_patches(patcher2, prefix).items():
+        if key not in kp1:
             continue
-        scale = longest_prefix_match(key, ratios)
-        new_sd[key] = tensor * scale if scale != 1.0 else tensor
-    return comfy.sd.VAE(sd=new_sd)
+        name = _layer_name(key, prefix, normalize)
+        if name is None:
+            continue
+        total += 1
+        ratio = longest_prefix_match(name, ratios)
+        if ratio is None:
+            unmatched.append(name)       # uncovered -> keep model1
+            continue
+        if ratio == 0.0:
+            continue
+        shape1, shape2 = _weight_shape(kp1[key]), _weight_shape(patch)
+        if shape1 is not None and shape2 is not None and shape1 != shape2:
+            mismatched += 1
+            continue
+        # add_patches(patches, strength_patch, strength_model):
+        #   out = weight(model1) * strength_model + patch(model2) * strength_patch
+        m.add_patches({key: patch}, ratio, 1.0 - ratio)
+        changed += 1
+    _report(label, total, changed, unmatched, mismatched)
+    return m
 
 
-def merge_vae_sd(vae1, vae2, ratios: dict, default_ratio: float = 0.5):
-    """Blend two VAE state dicts key-by-key: (1-ratio)*vae1 + ratio*vae2."""
+# ---- VAE (state-dict based) -----------------------------------------------------
+
+def _lerp(a, b, ratio: float):
+    """a * (1 - ratio) + b * ratio, computed in float32 and cast back to a's dtype."""
+    if ratio == 0.0:
+        return None
+    return (a.float() * (1.0 - ratio) + b.float() * ratio).to(a.dtype)
+
+
+def _combine_vae(vae1, vae2, fn, label: str):
+    """New VAE where fn(key, a, b) -> tensor | None (None keeps vae1's tensor).
+    Non-float tensors (integer buffers etc.) and keys missing from vae2 are kept as is."""
     sd1, sd2 = vae1.get_sd(), vae2.get_sd()
-    new_sd = {}
-    for key, tensor in sd1.items():
-        if key not in sd2:
-            new_sd[key] = tensor
+    out = {}
+    changed = mismatched = 0
+    for key, a in sd1.items():
+        b = sd2.get(key)
+        if b is None or not a.is_floating_point():
+            out[key] = a
             continue
-        ratio = longest_prefix_match(key, ratios) if ratios else default_ratio
-        new_sd[key] = tensor * (1.0 - ratio) + sd2[key] * ratio
-    for key, tensor in sd2.items():
-        new_sd.setdefault(key, tensor)
-    return comfy.sd.VAE(sd=new_sd)
+        if a.shape != b.shape:
+            mismatched += 1
+            out[key] = a
+            continue
+        res = fn(key, a, b.to(a.device))
+        if res is None:
+            out[key] = a
+        else:
+            out[key] = res
+            changed += 1
+    LOGGER.info("%s: changed %d / %d keys.", label, changed, len(sd1))
+    if mismatched:
+        LOGGER.warning("%s: %d keys skipped because the two VAEs' shapes differ.", label, mismatched)
+    return comfy.sd.VAE(sd=out)
 
 
-def numbered_keys(prefix: str, count: int, suffix: str = ".", start: int = 0) -> list[str]:
-    """e.g. numbered_keys("layers.", 3) -> ["layers.0.", "layers.1.", "layers.2."]"""
-    return [f"{prefix}{i}{suffix}" for i in range(start, start + count)]
+def scale_vae(vae, ratios: dict[str, float], label: str = "VAE Scale"):
+    out = {}
+    changed = 0
+    unmatched: list[str] = []
+    for key, tensor in vae.get_sd().items():
+        scale = longest_prefix_match(key, ratios)
+        if scale is None:
+            unmatched.append(key)
+        if scale in (None, 1.0) or not tensor.is_floating_point():
+            out[key] = tensor
+        else:
+            out[key] = tensor * scale
+            changed += 1
+    _report(label, len(out), changed, unmatched)
+    return comfy.sd.VAE(sd=out)
 
 
-# ------------------------------------------------------------------------------
-# Node: Key Name Inspector
-# ------------------------------------------------------------------------------
+def merge_vae(vae1, vae2, ratios: dict[str, float], label: str = "VAE Merge"):
+    unmatched: list[str] = []
+
+    def fn(key, a, b):
+        ratio = longest_prefix_match(key, ratios)
+        if ratio is None:
+            unmatched.append(key)
+            return None
+        return _lerp(a, b, ratio)
+
+    result = _combine_vae(vae1, vae2, fn, label)
+    if unmatched:
+        LOGGER.info("%s: %d keys are not covered by any widget (kept from vae1), e.g. %s",
+                    label, len(unmatched), unmatched[:5])
+    return result
+
+
+# ---- CLIP key normalisation -----------------------------------------------------
+
+_CLIP_SKIP_SUFFIXES = (".position_ids", ".logit_scale")
+
+
+def normalize_sdxl_clip(name: str) -> Optional[str]:
+    """'clip_l.transformer.text_model.encoder.layers.0.x' -> 'clip_l.encoder.layers.0.x'."""
+    if name.endswith(_CLIP_SKIP_SUFFIXES):
+        return None
+    return re.sub(r"\.transformer\.(?:text_model\.)?|\.text_model\.", ".", name, count=1)
+
+
+def normalize_qwen_clip(name: str) -> Optional[str]:
+    """'qwen25_7b.transformer.model.layers.0.x' -> 'model.layers.0.x'."""
+    if name.endswith(_CLIP_SKIP_SUFFIXES):
+        return None
+    return re.sub(r"^(?:[^.]+\.)?transformer\.", "", name)
+
+
+# ==============================================================================
+# 2. Layer tables
+#
+# Each entry is a dot-separated key prefix (no trailing dot needed). The longest
+# matching prefix of a weight key decides which widget controls it.
+# ==============================================================================
+
+# ---- Diffusion models -----------------------------------------------------------
+
+_SDXL = (
+    "time_embed", "label_emb",
+    *numbered("input_blocks", 9),
+    *numbered("middle_block", 3),
+    *numbered("output_blocks", 9),
+    "out",
+)
+
+_HIDREAM_I1 = (
+    "x_embedder", "t_embedder", "p_embedder", "caption_projection",
+    *numbered("double_stream_blocks", 16),
+    *numbered("single_stream_blocks", 32),
+    "final_layer",
+)
+
+# Verified against the HiDream O1 Image FP16 key dump (740 keys, full coverage).
+_HIDREAM_O1 = (
+    "x_embedder", "t_embedder1", "final_layer2",
+    "language_model.embed_tokens",
+    *numbered("language_model.layers", 36),
+    "language_model.norm",
+    *numbered("visual.blocks", 27),
+    "visual.merger", "visual.patch_embed", "visual.pos_embed",
+)
+
+_QWEN_IMAGE = (
+    "pos_embeds", "img_in", "txt_norm", "txt_in", "time_text_embed",
+    *numbered("transformer_blocks", 60),
+    "norm_out", "proj_out",
+)
+
+# Distinct key layout from Qwen-Image: no pos_embeds / txt_norm, adds modulation / norm_out,
+# 32 transformer_blocks.
+_QWEN_IMAGE_2_1 = (
+    "img_in", "modulation.1", "norm_out", "time_text_embed", "txt_in",
+    *numbered("transformer_blocks", 32),
+    "proj_out",
+)
+
+_Z_IMAGE = (
+    "cap_embedder", "cap_pad_token",
+    *numbered("context_refiner", 2),
+    *numbered("layers", 30),
+    *numbered("noise_refiner", 2),
+    "final_layer", "t_embedder", "x_embedder", "x_pad_token",
+)
+
+# Krea2 uses ComfyUI's post-load module names, not the safetensors key names:
+#   img_in -> first, txt_in -> txtmlp, time_embed -> tmlp, time_mod_proj -> tproj,
+#   text_fusion -> txtfusion, transformer_blocks.N -> blocks.N, final_layer -> last
+_KREA2 = (
+    "first", "txtmlp", "tmlp", "tproj",
+    *numbered("txtfusion.refiner_blocks", 2),
+    *numbered("txtfusion.layerwise_blocks", 2),
+    "txtfusion.projector",
+    *numbered("blocks", 28),
+    "last",
+)
+
+_FLUX2_KLEIN = (
+    "img_in", "time_in", "txt_in",
+    *numbered_with_parts("double_blocks", 5, ("img_attn", "img_mlp", "txt_attn", "txt_mlp")),
+    "double_stream_modulation_img", "double_stream_modulation_txt",
+    *numbered("single_blocks", 20),
+    "single_stream_modulation", "final_layer",
+)
+
+_ERNIE_LAYER_PARTS = (
+    "self_attention",
+    "self_attention.to_q", "self_attention.to_k", "self_attention.to_v", "self_attention.to_out",
+    "self_attention.norm_q", "self_attention.norm_k",
+    "mlp", "mlp.gate_proj", "mlp.up_proj", "mlp.linear_fc2",
+    "adaLN_mlp_ln", "adaLN_sa_ln",
+)
+_ERNIE_IMAGE = (
+    "x_embedder", "text_proj", "time_embedding",
+    *numbered_with_parts("layers", 36, _ERNIE_LAYER_PARTS),
+    "adaLN_modulation", "final_norm", "final_linear",
+)
+
+# rope.bands (F32 constant buffer) is intentionally not covered.
+_MOSS_IMAGE = (
+    "video_embedder", "time_embedding", "text_embedder.proj",
+    *numbered("text_embedder.blocks", 2),
+    "shared_block_modulation",
+    *numbered("layers", 42),
+    "video_head_modulation", "final_norm_video", "final_linear_video",
+)
+
+# ---- CLIP / text encoders (names after normalize_*_clip) -------------------------
+
+_CLIP_SDXL = (
+    "clip_l.embeddings",
+    *numbered("clip_l.encoder.layers", 12),
+    "clip_l.final_layer_norm",
+    "clip_g.embeddings",
+    *numbered("clip_g.encoder.layers", 32),
+    "clip_g.final_layer_norm", "clip_g.text_projection",
+)
+
+_CLIP_QWEN25_VL = (
+    "model.embed_tokens", "visual.patch_embed",
+    *numbered("visual.blocks", 32),
+    "visual.merger",
+    *numbered("model.layers", 28),
+    "model.norm", "lm_head",
+)
+
+# ---- VAE (ComfyUI get_sd() keys) -------------------------------------------------
+
+_VAE_SDXL = (
+    "quant_conv", "post_quant_conv",
+    "encoder.conv_in", *numbered("encoder.down", 4),
+    "encoder.mid.attn_1", "encoder.mid.block_1", "encoder.mid.block_2",
+    "encoder.norm_out", "encoder.conv_out",
+    "decoder.conv_in",
+    "decoder.mid.attn_1", "decoder.mid.block_1", "decoder.mid.block_2",
+    *numbered("decoder.up", 4),
+    "decoder.norm_out", "decoder.conv_out",
+)
+
+_VAE_FLUX = (
+    "encoder.conv_in", "encoder.conv_out", "encoder.norm_out",
+    *numbered("encoder.down", 4),
+    *[f"encoder.down.{i}.block.{j}" for i in range(4) for j in range(2)],
+    *numbered("encoder.down", 3, sub="downsample"),
+    "encoder.mid.block_1", "encoder.mid.block_2", "encoder.mid.attn_1",
+    "decoder.conv_in", "decoder.conv_out", "decoder.norm_out",
+    *numbered("decoder.up", 4),
+    *[f"decoder.up.{i}.block.{j}" for i in range(4) for j in range(3)],
+    *numbered("decoder.up", 3, start=1, sub="upsample"),
+    "decoder.mid.block_1", "decoder.mid.block_2", "decoder.mid.attn_1",
+)
+
+# Integer buffers (e.g. batch-norm counters) are skipped automatically.
+_VAE_FLUX2 = (
+    "quant_conv", "post_quant_conv",
+    "encoder.conv_in", "encoder.conv_out", "encoder.norm_out",
+    *numbered("encoder.down", 4),
+    "encoder.mid.attn_1", "encoder.mid.block_1", "encoder.mid.block_2",
+    "decoder.conv_in", "decoder.conv_out", "decoder.norm_out",
+    "decoder.mid.attn_1", "decoder.mid.block_1", "decoder.mid.block_2",
+    *numbered("decoder.up", 4),
+)
+
+# Wan2.1 and Qwen-Image share the same VAE architecture.
+_VAE_WAN = (
+    "conv1", "conv2",
+    "encoder.conv1", *numbered("encoder.downsamples", 11),
+    *numbered("encoder.middle", 3), "encoder.head",
+    "decoder.conv1", *numbered("decoder.middle", 3),
+    *numbered("decoder.upsamples", 15), "decoder.head",
+)
+
+
+# ==============================================================================
+# 3. Registry
+# ==============================================================================
+
+@dataclass(frozen=True)
+class Arch:
+    slug: str                       # node_id suffix, e.g. "HiDreamO1Image"
+    name: str                       # display name, e.g. "HiDream O1 Image"
+    layer_keys: tuple[str, ...]
+    note: str = ""                  # appended to the node description
+    normalize: Optional[Callable[[str], Optional[str]]] = None   # CLIP key normaliser
+
+
+MODEL_ARCHS = (
+    Arch("SDXL", "SDXL", _SDXL),
+    Arch("HiDream", "HiDream I1", _HIDREAM_I1, "Full / Dev / Fast."),
+    Arch("HiDreamO1Image", "HiDream O1 Image", _HIDREAM_O1, "UiT architecture."),
+    Arch("QwenImage", "Qwen Image", _QWEN_IMAGE),
+    Arch("QwenImage2_1", "Qwen Image 2.1", _QWEN_IMAGE_2_1),
+    Arch("ZImage", "Z-Image", _Z_IMAGE),
+    Arch("Krea2", "Krea2", _KREA2, "Prefixes are ComfyUI's post-load module names."),
+    Arch("Flux2Klein", "Flux2 Klein", _FLUX2_KLEIN),
+    Arch("ErnieImage", "ERNIE Image", _ERNIE_IMAGE),
+    Arch("MossImage", "MOSS Image", _MOSS_IMAGE),
+)
+
+CLIP_ARCHS = (
+    Arch("DualSDXL", "Dual SDXL", _CLIP_SDXL, "CLIP-L (12 layers) + CLIP-G (32 layers).",
+         normalize=normalize_sdxl_clip),
+    Arch("Qwen25VL", "Qwen2.5-VL 7B", _CLIP_QWEN25_VL, normalize=normalize_qwen_clip),
+)
+
+VAE_ARCHS = (
+    Arch("SDXL", "SDXL", _VAE_SDXL),
+    Arch("Flux", "FLUX", _VAE_FLUX),
+    Arch("Flux2", "FLUX2", _VAE_FLUX2),
+    Arch("Wan21", "Wan2.1 / Qwen-Image", _VAE_WAN),
+)
+
+
+@dataclass(frozen=True)
+class Component:
+    """What differs between MODEL / CLIP / VAE nodes."""
+    label: str          # node_id / display-name part: "Model", "CLIP", "VAE"
+    io_type: type       # io.Model / io.Clip / io.Vae
+    arg: str            # input name: "model", "clip", "vae"
+    scale: Callable     # (obj, ratios, arch, label) -> obj
+    merge: Callable     # (obj1, obj2, ratios, arch, label) -> obj
+
+
+MODEL = Component(
+    "Model", io.Model, "model",
+    scale=lambda o, r, a, lbl: scale_patcher(o, r, prefix=MODEL_PREFIX, label=lbl),
+    merge=lambda o1, o2, r, a, lbl: merge_patchers(o1, o2, r, prefix=MODEL_PREFIX, label=lbl),
+)
+CLIP = Component(
+    "CLIP", io.Clip, "clip",
+    scale=lambda o, r, a, lbl: scale_patcher(o, r, normalize=a.normalize, label=lbl),
+    merge=lambda o1, o2, r, a, lbl: merge_patchers(o1, o2, r, normalize=a.normalize, label=lbl),
+)
+VAE = Component(
+    "VAE", io.Vae, "vae",
+    scale=lambda o, r, a, lbl: scale_vae(o, r, lbl),
+    merge=lambda o1, o2, r, a, lbl: merge_vae(o1, o2, r, lbl),
+)
+
+
+# ==============================================================================
+# 4. Node factory
+# ==============================================================================
+
+def _float_inputs(keys: tuple[str, ...], arg: dict) -> list:
+    return [io.Float.Input(key, **arg) for key in keys]
+
+
+def _make_scale_node(comp: Component, arch: Arch) -> type[io.ComfyNode]:
+    label = f"{comp.label} Scale {arch.name}"
+
+    class _ScaleNode(io.ComfyNode):
+        @classmethod
+        def define_schema(cls) -> io.Schema:
+            return io.Schema(
+                node_id=f"EasygoingNodes_{comp.label}Scale{arch.slug}",
+                display_name=label,
+                category=CATEGORY,
+                description=f"Scale specific layers of {arch.name}. "
+                            "1.0 keeps the original, 0.0 zeroes the layer, >1.0 amplifies. "
+                            f"{arch.note}".strip(),
+                inputs=[comp.io_type.Input(comp.arg), *_float_inputs(arch.layer_keys, _SCALE_ARG)],
+                outputs=[comp.io_type.Output()],
+            )
+
+        @classmethod
+        def execute(cls, **kwargs) -> io.NodeOutput:
+            obj = kwargs.pop(comp.arg)
+            ratios = collect_ratios(kwargs, arch.layer_keys)
+            return io.NodeOutput(comp.scale(obj, ratios, arch, label))
+
+    _ScaleNode.__name__ = _ScaleNode.__qualname__ = f"{comp.label}Scale{arch.slug}"
+    return _ScaleNode
+
+
+def _make_merge_node(comp: Component, arch: Arch) -> type[io.ComfyNode]:
+    label = f"{comp.label} Merge {arch.name}"
+
+    class _MergeNode(io.ComfyNode):
+        @classmethod
+        def define_schema(cls) -> io.Schema:
+            return io.Schema(
+                node_id=f"EasygoingNodes_{comp.label}Merge{arch.slug}",
+                display_name=label,
+                category=CATEGORY,
+                description=f"Block-wise merge of two {arch.name}. "
+                            "0.0 keeps the first, 1.0 uses the second, in-between values blend linearly. "
+                            "Weights not covered by any widget are kept from the first. "
+                            f"{arch.note}".strip(),
+                inputs=[
+                    comp.io_type.Input(f"{comp.arg}1"),
+                    comp.io_type.Input(f"{comp.arg}2"),
+                    *_float_inputs(arch.layer_keys, _MERGE_ARG),
+                ],
+                outputs=[comp.io_type.Output()],
+            )
+
+        @classmethod
+        def execute(cls, **kwargs) -> io.NodeOutput:
+            obj1 = kwargs.pop(f"{comp.arg}1")
+            obj2 = kwargs.pop(f"{comp.arg}2")
+            ratios = collect_ratios(kwargs, arch.layer_keys)
+            return io.NodeOutput(comp.merge(obj1, obj2, ratios, arch, label))
+
+    _MergeNode.__name__ = _MergeNode.__qualname__ = f"{comp.label}Merge{arch.slug}"
+    return _MergeNode
+
+
+def _build_block_nodes() -> list[type[io.ComfyNode]]:
+    nodes = []
+    for comp, archs in ((MODEL, MODEL_ARCHS), (CLIP, CLIP_ARCHS), (VAE, VAE_ARCHS)):
+        for arch in archs:
+            nodes.append(_make_scale_node(comp, arch))
+            nodes.append(_make_merge_node(comp, arch))
+    return nodes
+
+
+# ==============================================================================
+# 5. Other nodes
+# ==============================================================================
 
 class KeyNameInspector(io.ComfyNode):
-    """Debug node: lists internal weight key names for MODEL / CLIP / VAE inputs,
-    passing every input through unchanged."""
+    """Debug node: lists internal weight key names for MODEL / CLIP / VAE inputs and
+    passes every input through unchanged. Use it to write a layer table for a new Arch."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -134,38 +618,27 @@ class KeyNameInspector(io.ComfyNode):
         )
 
     @staticmethod
-    def _keys_from_model(model) -> list[str]:
-        try:
-            return sorted(model.get_key_patches("diffusion_model.").keys())
-        except Exception as e:
-            LOGGER.warning("KeyNameInspector: failed to read MODEL keys: %s", e)
-            return []
+    def _model_keys(model) -> list[str]:
+        return sorted(model.get_key_patches(MODEL_PREFIX))
 
     @staticmethod
-    def _keys_from_clip(clip) -> list[str]:
-        try:
-            return sorted(clip.get_sd().keys())
-        except Exception as e:
-            LOGGER.warning("KeyNameInspector: failed to read CLIP keys: %s", e)
-            return []
+    def _clip_keys(clip) -> list[str]:
+        return sorted(clip.get_sd())
 
     @staticmethod
-    def _keys_from_vae(vae) -> list[str]:
+    def _vae_keys(vae) -> list[str]:
         # VAE objects may expose get_sd() or only first_stage_model.state_dict().
-        try:
-            if hasattr(vae, "get_sd"):
-                return sorted(vae.get_sd().keys())
-        except Exception as e:
-            LOGGER.warning("KeyNameInspector: VAE.get_sd() failed: %s", e)
-        try:
-            if hasattr(vae, "first_stage_model"):
-                return sorted(vae.first_stage_model.state_dict().keys())
-        except Exception as e:
-            LOGGER.warning("KeyNameInspector: VAE.first_stage_model.state_dict() failed: %s", e)
-        return []
+        if hasattr(vae, "get_sd"):
+            return sorted(vae.get_sd())
+        return sorted(vae.first_stage_model.state_dict())
 
     @staticmethod
-    def _format_section(title: str, keys: list[str], max_console_lines: int = 80) -> str:
+    def _section(title: str, get_keys, obj, max_console_lines: int = 80) -> str:
+        try:
+            keys = get_keys(obj)
+        except Exception as e:
+            LOGGER.warning("KeyNameInspector: failed to read %s: %s", title, e)
+            keys = []
         print("=" * 80)
         print(f"[KeyNameInspector] {title}: total keys = {len(keys)}")
         for k in keys[:max_console_lines]:
@@ -173,750 +646,37 @@ class KeyNameInspector(io.ComfyNode):
         if len(keys) > max_console_lines:
             print(f"  ... and {len(keys) - max_console_lines} more")
         print("=" * 80)
-
-        lines = [f"### {title} (total keys: {len(keys)}) ###", *keys]
-        return "\n".join(lines)
+        return "\n".join([f"### {title} (total keys: {len(keys)}) ###", *keys])
 
     @classmethod
     def execute(cls, model=None, clip=None, vae=None) -> io.NodeOutput:
         sections = []
         if model is not None:
-            sections.append(cls._format_section("MODEL keys (diffusion_model.)", cls._keys_from_model(model)))
+            sections.append(cls._section("MODEL keys (diffusion_model.)", cls._model_keys, model))
         if clip is not None:
-            sections.append(cls._format_section("CLIP keys", cls._keys_from_clip(clip)))
+            sections.append(cls._section("CLIP keys", cls._clip_keys, clip))
         if vae is not None:
-            sections.append(cls._format_section("VAE keys", cls._keys_from_vae(vae)))
+            sections.append(cls._section("VAE keys", cls._vae_keys, vae))
 
         if sections:
             report = "\n\n".join(sections)
         else:
             report = "KeyNameInspector: no input connected (model / clip / vae all unconnected)"
             print(report)
-
         return io.NodeOutput(model, clip, vae, report)
 
 
-# ------------------------------------------------------------------------------
-# Model-specific layer key tables
-#
-# Each table lists the dot-separated prefixes used for longest-prefix-match
-# scaling/merging of a given architecture's diffusion_model weights.
-# ------------------------------------------------------------------------------
-
-_SDXL_LAYER_KEYS = [
-    "time_embed.", "label_emb.",
-    *numbered_keys("input_blocks.", 9, suffix=""),
-    *numbered_keys("middle_block.", 3, suffix=""),
-    *numbered_keys("output_blocks.", 9, suffix=""),
-    "out.",
-]
-
-_HIDREAM_LAYER_KEYS = [
-    "x_embedder.", "t_embedder.", "caption_projection.",
-    *numbered_keys("double_stream_blocks.", 13),
-    *numbered_keys("single_stream_blocks.", 32),
-]
-
-_QWEN_IMAGE_LAYER_KEYS = [
-    "pos_embeds.", "img_in.", "txt_norm.", "txt_in.", "time_text_embed.",
-    *numbered_keys("transformer_blocks.", 60),
-    "proj_out.",
-]
-
-# Qwen-Image 2.1: distinct key layout from Qwen-Image (no pos_embeds./txt_norm.,
-# adds modulation./norm_out., 32 transformer_blocks with img_mlp.gate_up/out naming).
-_QWEN_IMAGE_2_1_LAYER_KEYS = [
-    "img_in.", "modulation.1.", "norm_out.", "time_text_embed.", "txt_in.",
-    *numbered_keys("transformer_blocks.", 32),
-    "proj_out.",
-]
-
-_Z_IMAGE_LAYER_KEYS = [
-    "cap_embedder.", "cap_pad_token",
-    *numbered_keys("context_refiner.", 2),
-    *numbered_keys("layers.", 30),
-    *numbered_keys("noise_refiner.", 2),
-    "final_layer.", "t_embedder.", "x_embedder.", "x_pad_token",
-]
-
-# Krea2 uses ComfyUI's internal (post-load) module names rather than the
-# safetensors key names; see class docstring for the safetensors -> internal mapping.
-_KREA2_LAYER_KEYS = [
-    "first.", "txtmlp.", "tmlp.", "tproj.",
-    *numbered_keys("txtfusion.refiner_blocks.", 2),
-    *numbered_keys("txtfusion.layerwise_blocks.", 2),
-    "txtfusion.projector.",
-    *numbered_keys("blocks.", 28),
-    "last.",
-]
-
-_FLUX2_KLEIN_LAYER_KEYS = [
-    "img_in.", "time_in.", "txt_in.",
-    *[key for i in range(5) for key in (
-        f"double_blocks.{i}.",
-        f"double_blocks.{i}.img_attn.",
-        f"double_blocks.{i}.img_mlp.",
-        f"double_blocks.{i}.txt_attn.",
-        f"double_blocks.{i}.txt_mlp.",
-    )],
-    "double_stream_modulation_img.", "double_stream_modulation_txt.",
-    *numbered_keys("single_blocks.", 20),
-    "single_stream_modulation.", "final_layer.",
-]
-
-_ERNIE_IMAGE_LAYER_KEYS = [
-    "x_embedder.", "text_proj.", "time_embedding.",
-    *[key for i in range(36) for key in (
-        f"layers.{i}.",
-        f"layers.{i}.self_attention.",
-        f"layers.{i}.self_attention.to_q.",
-        f"layers.{i}.self_attention.to_k.",
-        f"layers.{i}.self_attention.to_v.",
-        f"layers.{i}.self_attention.to_out.",
-        f"layers.{i}.self_attention.norm_q.",
-        f"layers.{i}.self_attention.norm_k.",
-        f"layers.{i}.mlp.",
-        f"layers.{i}.mlp.gate_proj.",
-        f"layers.{i}.mlp.up_proj.",
-        f"layers.{i}.mlp.linear_fc2.",
-        f"layers.{i}.adaLN_mlp_ln.",
-        f"layers.{i}.adaLN_sa_ln.",
-    )],
-    "adaLN_modulation.", "final_norm.", "final_linear.",
-]
-
-_HIDREAM_O1_LAYER_KEYS = [
-    "x_embedder.", "t_embedder1.", "final_layer2.", "lm_head.",
-    *numbered_keys("language_model.layers.", 36),
-    *numbered_keys("visual.blocks.", 27),
-    "visual.merger.", "visual.deepstack_merger_list.", "visual.patch_embed.", "visual.pos_embed.",
-]
-
-# MOSS Image (moss_image_sft_bf16.safetensors)
-#   - layers.0-41: 42 blocks (qkv / o / ffn_up_gate / ffn_down / norm / q_norm / k_norm)
-#   - text_embedder: blocks.0-1 + proj
-#   - rope.bands (F32 constant buffer) is intentionally not scalable.
-_MOSS_IMAGE_LAYER_KEYS = [
-    "video_embedder.", "time_embedding.", "text_embedder.proj.",
-    *numbered_keys("text_embedder.blocks.", 2),
-    "shared_block_modulation.",
-    *numbered_keys("layers.", 42),
-    "video_head_modulation.", "final_norm_video.", "final_linear_video.",
-]
-
-_CLIP_SDXL_LAYER_KEYS = [
-    "clip_l.embeddings",
-    *numbered_keys("clip_l.encoder.layers.", 12, suffix=""),
-    "clip_l.final_layer_norm",
-    "clip_g.embeddings",
-    *numbered_keys("clip_g.encoder.layers.", 32, suffix=""),
-    "clip_g.final_layer_norm", "clip_g.text_projection",
-]
-
-_CLIP_QWEN_LAYER_KEYS = [
-    "model.embed_tokens", "visual.patch_embed",
-    *numbered_keys("visual.blocks.", 32, suffix=""),
-    "visual.merger",
-    *numbered_keys("model.layers.", 28, suffix=""),
-    "model.norm", "lm_head",
-]
-
-_VAE_SDXL_LAYER_KEYS = [
-    "quant_conv", "post_quant_conv",
-    "encoder.conv_in",
-    *numbered_keys("encoder.down.", 4),
-    "encoder.mid.attn_1.", "encoder.mid.block_1.", "encoder.mid.block_2.",
-    "encoder.norm_out", "encoder.conv_out",
-    "decoder.conv_in",
-    "decoder.mid.attn_1.", "decoder.mid.block_1.", "decoder.mid.block_2.",
-    *numbered_keys("decoder.up.", 4),
-    "decoder.norm_out", "decoder.conv_out",
-]
-
-_VAE_FLUX_LAYER_KEYS = [
-    "encoder.conv_in", "encoder.conv_out", "encoder.norm_out",
-    *numbered_keys("encoder.down.", 4),
-    *[f"encoder.down.{i}.block.{j}." for i in range(4) for j in range(3)],
-    *numbered_keys("encoder.down.", 3, suffix=".downsample."),
-    "encoder.mid.", "encoder.mid.block_1.", "encoder.mid.block_2.", "encoder.mid.attn_1.",
-    "decoder.conv_in", "decoder.conv_out", "decoder.norm_out",
-    *numbered_keys("decoder.up.", 4),
-    *[f"decoder.up.{i}.block.{j}." for i in range(4) for j in range(3)],
-    *numbered_keys("decoder.up.", 3, suffix=".upsample.", start=1),
-    "decoder.mid.", "decoder.mid.block_1.", "decoder.mid.block_2.", "decoder.mid.attn_1.",
-]
-
-_VAE_FLUX2_LAYER_KEYS = [
-    "quant_conv", "post_quant_conv",
-    "encoder.conv_in", "encoder.conv_out", "encoder.norm_out",
-    *numbered_keys("encoder.down.", 4),
-    "encoder.mid.attn_1.", "encoder.mid.block_1.", "encoder.mid.block_2.",
-    "decoder.conv_in", "decoder.conv_out", "decoder.norm_out",
-    "decoder.mid.attn_1.", "decoder.mid.block_1.", "decoder.mid.block_2.",
-    *numbered_keys("decoder.up.", 4),
-]
-_VAE_FLUX2_SKIP_DTYPES = {torch.int32, torch.int64, torch.bool}
-
-_VAE_QWEN_LAYER_KEYS = [
-    "conv1", "conv2",
-    "encoder.conv1",
-    *numbered_keys("encoder.downsamples.", 11),
-    "encoder.middle.0.", "encoder.middle.1.", "encoder.middle.2.",
-    "encoder.head.",
-    "decoder.conv1",
-    "decoder.middle.0.", "decoder.middle.1.", "decoder.middle.2.",
-    *numbered_keys("decoder.upsamples.", 15),
-    "decoder.head.",
-]
-
-_VAE_WAN_VIDEO_LAYER_KEYS = [
-    "conv1.", "conv2.",
-    "encoder.conv1.", "encoder.head.", "encoder.middle.",
-    "encoder.middle.0.", "encoder.middle.1.", "encoder.middle.2.",
-    *numbered_keys("encoder.downsamples.", 11),
-    "decoder.conv1.", "decoder.head.", "decoder.middle.",
-    "decoder.middle.0.", "decoder.middle.1.", "decoder.middle.2.",
-    *numbered_keys("decoder.upsamples.", 15),
-]
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale SDXL
-# ------------------------------------------------------------------------------
-
-class ModelScaleSDXL(io.ComfyNode):
-    """Scale SDXL model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleSDXL",
-            display_name="Model Scale SDXL",
-            category="advanced/model_merging/model_specific",
-            inputs=build_scale_inputs(_SDXL_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Merge HiDream
-# ------------------------------------------------------------------------------
-
-class ModelMergeHiDream(io.ComfyNode):
-    """Merge node for HiDream series models (Full, Dev, Fast).
-    Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelMergeHiDream",
-            display_name="Model Merge HiDream",
-            category="advanced/model_merging/model_specific",
-            description="Merge node for HiDream series models (Full, Dev, Fast). "
-                        "Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31.",
-            inputs=[
-                io.Model.Input("model1"),
-                io.Model.Input("model2"),
-                *[io.Float.Input(key, **_RATIO_ARG) for key in _HIDREAM_LAYER_KEYS],
-            ],
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model1, model2, **kwargs) -> io.NodeOutput:
-        m = model1.clone()
-        kp = model2.get_key_patches("diffusion_model.")
-        for key in kp:
-            ratio = longest_prefix_match(key[len("diffusion_model."):], kwargs)
-            m.add_patches({key: kp[key]}, 1.0 - ratio, ratio)
-        return io.NodeOutput(m)
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale HiDream
-# ------------------------------------------------------------------------------
-
-class ModelScaleHiDream(io.ComfyNode):
-    """Scale HiDream series model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleHiDream",
-            display_name="Model Scale HiDream",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of HiDream series models (Full, Dev, Fast). "
-                        "Assumes double_stream_blocks 0-12 and single_stream_blocks 0-31.",
-            inputs=build_scale_inputs(_HIDREAM_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale Qwen Image
-# ------------------------------------------------------------------------------
-
-class ModelScaleQwenImage(io.ComfyNode):
-    """Scale Qwen Image model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleQwenImage",
-            display_name="Model Scale Qwen Image",
-            category="advanced/model_merging/model_specific",
-            inputs=build_scale_inputs(_QWEN_IMAGE_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale Qwen Image 2.1
-# ------------------------------------------------------------------------------
-
-class ModelScaleQwenImage2_1(io.ComfyNode):
-    """Scale Qwen-Image 2.1 model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleQwenImage2_1",
-            display_name="Model Scale Qwen Image 2.1",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of Qwen-Image 2.1 models. "
-                        "Assumes 32 transformer_blocks. "
-                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_QWEN_IMAGE_2_1_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Merge Z-Image
-# ------------------------------------------------------------------------------
-
-class ModelMergeZImage(io.ComfyNode):
-    """Merge node for Z-Image models. ratio=1.0 uses model2, ratio=0.0 uses model1."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelMergeZImage",
-            display_name="Model Merge Z-Image",
-            category="advanced/model_merging/model_specific",
-            inputs=[
-                io.Model.Input("model1"),
-                io.Model.Input("model2"),
-                *[io.Float.Input(key, **_RATIO_ARG) for key in _Z_IMAGE_LAYER_KEYS],
-            ],
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model1, model2, **kwargs) -> io.NodeOutput:
-        m = model1.clone()
-        kp = model2.get_key_patches("diffusion_model.")
-        for key in kp:
-            ratio = longest_prefix_match(key[len("diffusion_model."):], kwargs)
-            m.add_patches({key: kp[key]}, 1.0 - ratio, ratio)
-        return io.NodeOutput(m)
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale Z-Image
-# ------------------------------------------------------------------------------
-
-class ModelScaleZImage(io.ComfyNode):
-    """Scale Z-Image model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleZImage",
-            display_name="Model Scale Z-Image",
-            category="advanced/model_merging/model_specific",
-            inputs=build_scale_inputs(_Z_IMAGE_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale Krea2
-# ------------------------------------------------------------------------------
-
-class ModelScaleKrea2(io.ComfyNode):
-    """Scale Krea2 (Krea-2-Turbo) model layers.
-
-    Prefixes match ComfyUI's post-load internal module names, not the
-    safetensors key names. UNETLoader renames as follows:
-      img_in.* -> first.*, txt_in.* -> txtmlp.*, time_embed.* -> tmlp.*,
-      time_mod_proj.* -> tproj.*, text_fusion.* -> txtfusion.*,
-      transformer_blocks.{0..27}.* -> blocks.{0..27}.*, final_layer.* -> last.*
-    """
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleKrea2",
-            display_name="Model Scale Krea2",
-            category="advanced/model_merging/model_specific",
-            inputs=build_scale_inputs(_KREA2_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale Flux2 Klein
-# ------------------------------------------------------------------------------
-
-class ModelScaleFlux2Klein(io.ComfyNode):
-    """Scale FLUX2 Klein model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleFlux2Klein",
-            display_name="Model Scale Flux2 Klein",
-            category="advanced/model_merging/model_specific",
-            inputs=build_scale_inputs(_FLUX2_KLEIN_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale ERNIE Image
-# ------------------------------------------------------------------------------
-
-class ModelScaleErnieImage(io.ComfyNode):
-    """Scale ERNIE Image model layers (ernie-image.safetensors, layers.0-35)."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleErnieImage",
-            display_name="Model Scale ERNIE Image",
-            category="advanced/model_merging/model_specific",
-            inputs=build_scale_inputs(_ERNIE_IMAGE_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale MOSS Image
-# ------------------------------------------------------------------------------
-
-class ModelScaleMossImage(io.ComfyNode):
-    """Scale MOSS Image model layers. scale=1.0 keeps original, scale=0.0 zeroes out."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleMossImage",
-            display_name="Model Scale MOSS Image",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of MOSS Image models. "
-                        "Assumes layers 0-41 and text_embedder.blocks 0-1. "
-                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_MOSS_IMAGE_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        return io.NodeOutput(scale_model_by_prefix(model, kwargs))
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Scale HiDream-O1-Image
-# ------------------------------------------------------------------------------
-
-class ModelScaleHiDreamO1Image(io.ComfyNode):
-    """Scale HiDream-O1-Image (UiT architecture) layers.
-    Uses ModelPatcher clone/patch — no deepcopy, no in-place mutation."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelScaleHiDreamO1Image",
-            display_name="Model Scale HiDream-O1-Image",
-            category="HiDream O1",
-            description="Scale specific layers of HiDream-O1-Image (UiT architecture). "
-                        "scale=1.0: unchanged | scale=0.0: zero out | scale>1.0: amplify",
-            inputs=build_scale_inputs(_HIDREAM_O1_LAYER_KEYS, "model", io.Model),
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model, **kwargs) -> io.NodeOutput:
-        ratios = {k: v for k, v in kwargs.items() if v != 1.0}
-        if not ratios:
-            LOGGER.info("ModelScaleHiDreamO1Image: all scales are 1.0, skipping.")
-            return io.NodeOutput(model)
-
-        patcher = getattr(model, "patcher", model)
-        m = patcher.clone()
-
-        try:
-            kp_all = m.get_key_patches()
-        except TypeError:
-            kp_all = m.get_key_patches("")
-        if not kp_all:
-            LOGGER.warning("ModelScaleHiDreamO1Image: get_key_patches() returned empty dict.")
-            return io.NodeOutput(model)
-
-        # Auto-detect the active key prefix from the first matching candidate.
-        detected_prefix = ""
-        for candidate in ("diffusion_model.", "model."):
-            if any(k.startswith(candidate) for k in kp_all):
-                detected_prefix = candidate
-                break
-
-        kp = {k: v for k, v in kp_all.items() if k.startswith(detected_prefix)} if detected_prefix else kp_all
-
-        modified = 0
-        for key, patch in kp.items():
-            scale = longest_prefix_match(key[len(detected_prefix):], ratios)
-            if scale == 1.0:
-                continue
-            m.add_patches({key: patch}, scale - 1.0, 1.0)
-            modified += 1
-
-        LOGGER.info("ModelScaleHiDreamO1Image: patched %d / %d keys (prefix=%r).",
-                    modified, len(kp), detected_prefix)
-
-        try:
-            result = model.clone_with_patcher(m)
-        except (AttributeError, TypeError):
-            result = m
-        return io.NodeOutput(result)
-
-
-# ------------------------------------------------------------------------------
-# Node: Model Merge HiDream-O1-Image
-# ------------------------------------------------------------------------------
-
-def _all_key_patches(patcher) -> dict:
-    """get_key_patches() for every key, tolerating signatures that require a prefix arg."""
-    try:
-        return patcher.get_key_patches()
-    except TypeError:
-        return patcher.get_key_patches("")
-
-
-def _detect_key_prefix(key_patches: dict) -> str:
-    """Return the first known diffusion-model prefix present in `key_patches`, else ''."""
-    for candidate in ("diffusion_model.", "model."):
-        if any(k.startswith(candidate) for k in key_patches):
-            return candidate
-    return ""
-
-
-class ModelMergeHiDreamO1Image(io.ComfyNode):
-    """Block-wise merge for HiDream-O1-Image (UiT architecture).
-    ratio=0.0 keeps model1, ratio=1.0 uses model2.
-    Uses ModelPatcher clone/patch — no deepcopy, no in-place mutation."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_ModelMergeHiDreamO1Image",
-            display_name="Model Merge HiDream-O1-Image",
-            category="HiDream O1",
-            description="Block-wise merge of two HiDream-O1-Image (UiT architecture) models. "
-                        "ratio=0.0 keeps model1 | ratio=1.0 uses model2. "
-                        "Weights not covered by any listed prefix are kept from model1.",
-            inputs=[
-                io.Model.Input("model1"),
-                io.Model.Input("model2"),
-                *[io.Float.Input(key, **_RATIO_ARG) for key in _HIDREAM_O1_LAYER_KEYS],
-            ],
-            outputs=single_output(io.Model),
-        )
-
-    @classmethod
-    def execute(cls, model1, model2, **kwargs) -> io.NodeOutput:
-        ratios = restore_layer_keys(kwargs, _HIDREAM_O1_LAYER_KEYS)
-
-        patcher1 = getattr(model1, "patcher", model1)
-        patcher2 = getattr(model2, "patcher", model2)
-        m = patcher1.clone()
-
-        kp1 = _all_key_patches(m)
-        kp2 = _all_key_patches(patcher2)
-        if not kp1 or not kp2:
-            LOGGER.warning("ModelMergeHiDreamO1Image: get_key_patches() returned empty dict.")
-            return io.NodeOutput(model1)
-
-        # Detect the active key prefix from model1 and apply it to both models.
-        prefix = _detect_key_prefix(kp1)
-
-        modified = 0
-        for key, patch in kp2.items():
-            if prefix and not key.startswith(prefix):
-                continue
-            # Unmatched keys default to 0.0 (keep model1) so uncovered weights are never swapped.
-            ratio = longest_prefix_match(key[len(prefix):], ratios, default=0.0)
-            if ratio == 0.0:
-                continue
-            m.add_patches({key: patch}, 1.0 - ratio, ratio)
-            modified += 1
-
-        if modified == 0:
-            LOGGER.info("ModelMergeHiDreamO1Image: nothing to merge (all ratios 0.0 or no matching keys).")
-            return io.NodeOutput(model1)
-
-        LOGGER.info("ModelMergeHiDreamO1Image: merged %d keys (prefix=%r).", modified, prefix)
-
-        try:
-            result = model1.clone_with_patcher(m)
-        except (AttributeError, TypeError):
-            result = m
-        return io.NodeOutput(result)
-
-
-# ------------------------------------------------------------------------------
-# Node: CLIP Scale Dual SDXL Block
-# ------------------------------------------------------------------------------
-
-class CLIPScaleDualSDXLBlock(io.ComfyNode):
-    """Scale SDXL Dual CLIP (CLIP-L: 12 layers, CLIP-G: 32 layers)."""
-
-    _SKIP_SUFFIXES = (".position_ids", ".logit_scale")
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_CLIPScaleDualSDXLBlock",
-            display_name="CLIP Scale Dual SDXL Block",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of SDXL Dual CLIP (CLIP-L: 12 layers, CLIP-G: 32 layers). "
-                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_CLIP_SDXL_LAYER_KEYS, "clip", io.Clip),
-            outputs=single_output(io.Clip),
-        )
-
-    @classmethod
-    def execute(cls, clip, **kwargs) -> io.NodeOutput:
-        m = clip.clone()
-        ratios = {k: v for k, v in kwargs.items() if v != 1.0}
-        if not ratios:
-            return io.NodeOutput(m)
-
-        # SDXL's full state-dict keys are longer than the widget prefixes
-        # (e.g. "clip_l.transformer.text_model...."), so normalize before matching.
-        patches_by_scale: dict[float, dict] = {}
-        for key, weight in m.get_sd().items():
-            if key.endswith(cls._SKIP_SUFFIXES):
-                continue
-            normalized = key.replace(".transformer.text_model.", ".").replace(".text_model.", ".")
-            scale = longest_prefix_match(normalized, ratios)
-            if scale != 1.0:
-                patches_by_scale.setdefault(scale, {})[key] = (weight,)
-
-        for scale, patches in patches_by_scale.items():
-            # add_patches: output = weight * strength_model + patch * strength_patch.
-            # With patch == weight: weight * 1.0 + weight * (scale - 1.0) = weight * scale.
-            m.add_patches(patches, scale - 1.0, 1.0)
-        return io.NodeOutput(m)
-
-
-# ------------------------------------------------------------------------------
-# Node: CLIP Scale Qwen Block
-# ------------------------------------------------------------------------------
-
-class CLIPScaleQwenBlock(io.ComfyNode):
-    """Scale Qwen-2.5-VL-7B CLIP layers."""
-
-    _SKIP_SUFFIXES = (".position_ids", ".logit_scale")
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_CLIPScaleQwenBlock",
-            display_name="CLIP Scale Qwen Block",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of Qwen-2.5-VL-7B CLIP. "
-                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_CLIP_QWEN_LAYER_KEYS, "clip", io.Clip),
-            outputs=single_output(io.Clip),
-        )
-
-    @classmethod
-    def execute(cls, clip, **kwargs) -> io.NodeOutput:
-        m = clip.clone()
-        ratios = {k: v for k, v in kwargs.items() if v != 1.0}
-        if not ratios:
-            return io.NodeOutput(m)
-
-        patches_by_scale: dict[float, dict] = {}
-        for key, patch in clip.get_key_patches().items():
-            if key.endswith(cls._SKIP_SUFFIXES):
-                continue
-            normalized = key[len("transformer."):] if key.startswith("transformer.") else key
-
-            # Require an exact segment boundary match to avoid e.g. "layers.1" matching "layers.10".
-            scale = 1.0
-            matched_len = 0
-            for prefix, value in ratios.items():
-                if normalized.startswith(prefix) and len(prefix) > matched_len:
-                    tail = normalized[len(prefix):]
-                    if tail == "" or tail.startswith("."):
-                        scale = value
-                        matched_len = len(prefix)
-            if scale != 1.0:
-                patches_by_scale.setdefault(scale, {})[key] = patch
-
-        for scale, patches in patches_by_scale.items():
-            # Here strength_model=0, strength_patch=scale, since patch already equals weight.
-            m.add_patches(patches, scale, 0.0)
-        return io.NodeOutput(m)
-
-
-# ------------------------------------------------------------------------------
-# Node: CLIP Save Qwen
-# ------------------------------------------------------------------------------
-
 class CLIPSaveQwen(io.ComfyNode):
-    """Save Qwen-2.5-VL-7B CLIP models, stripping the internal 'qwen25_7b.transformer.' prefix."""
+    """Save a Qwen-2.5-VL-7B CLIP, stripping the internal 'qwen25_7b.transformer.' prefix."""
+
+    _STRIP_PREFIXES = ("qwen25_7b.transformer.", "qwen25_7b.")
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="EasygoingNodes_CLIPSaveQwen",
             display_name="CLIP Save Qwen",
-            category="advanced/model_merging/model_specific",
+            category=CATEGORY,
             description="Saves Qwen-2.5-VL-7B CLIP models by stripping the internal "
                         "'qwen25_7b.transformer.' prefix.",
             is_output_node=True,
@@ -929,6 +689,13 @@ class CLIPSaveQwen(io.ComfyNode):
         )
 
     @classmethod
+    def _strip(cls, key: str) -> str:
+        for prefix in cls._STRIP_PREFIXES:
+            if key.startswith(prefix):
+                return key[len(prefix):]
+        return key
+
+    @classmethod
     def execute(cls, clip, filename_prefix: str) -> io.NodeOutput:
         metadata = {}
         if not args.disable_metadata:
@@ -938,31 +705,20 @@ class CLIPSaveQwen(io.ComfyNode):
                 for k, v in cls.hidden.extra_pnginfo.items():
                     metadata[k] = json.dumps(v)
 
-        strip_prefix = "qwen25_7b.transformer."
-        output_sd = {}
-        for key, value in clip.get_sd().items():
-            if key.startswith(strip_prefix):
-                output_sd[key[len(strip_prefix):]] = value
-            elif key.startswith("qwen25_7b."):
-                output_sd[key.replace("qwen25_7b.", "")] = value
-            else:
-                output_sd[key] = value
+        output_sd = {cls._strip(key): value for key, value in clip.get_sd().items()}
 
-        output_dir = folder_paths.get_output_directory()
         full_folder, filename, counter, _subfolder, _prefix = folder_paths.get_save_image_path(
-            filename_prefix, output_dir
+            filename_prefix, folder_paths.get_output_directory()
         )
         output_path = os.path.join(full_folder, f"{filename}_{counter:05}_.safetensors")
         comfy.utils.save_torch_file(output_sd, output_path, metadata=metadata)
-
         return io.NodeOutput()
 
 
-# ------------------------------------------------------------------------------
-# Node: VAE Merge Simple
-# ------------------------------------------------------------------------------
+# ---- Whole-VAE arithmetic (architecture independent) -----------------------------
 
 class VAEMergeSimple(io.ComfyNode):
+    """Uniform blend of two VAEs: vae1 * (1 - ratio) + vae2 * ratio."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -973,267 +729,62 @@ class VAEMergeSimple(io.ComfyNode):
             inputs=[
                 io.Vae.Input("vae1"),
                 io.Vae.Input("vae2"),
-                io.Float.Input("ratio", **_RATIO_ARG),
+                io.Float.Input("ratio", **_MERGE_ARG),
             ],
-            outputs=single_output(io.Vae),
+            outputs=[io.Vae.Output()],
         )
 
     @classmethod
     def execute(cls, vae1, vae2, ratio: float) -> io.NodeOutput:
-        return io.NodeOutput(merge_vae_sd(vae1, vae2, ratios={}, default_ratio=ratio))
+        return io.NodeOutput(_combine_vae(
+            vae1, vae2, lambda key, a, b: _lerp(a, b, ratio), "VAE Merge Simple"))
 
 
-# ------------------------------------------------------------------------------
-# Node: VAE Merge Subtract
-# ------------------------------------------------------------------------------
+def _make_vae_arith_node(action: str, sign: float) -> type[io.ComfyNode]:
+    """VAE Merge Add: vae1 + m * vae2.   VAE Merge Subtract: vae1 - m * vae2."""
+    label = f"VAE Merge {action}"
 
-class VAEMergeSubtract(io.ComfyNode):
+    class _ArithNode(io.ComfyNode):
+        @classmethod
+        def define_schema(cls) -> io.Schema:
+            return io.Schema(
+                node_id=f"EasygoingNodes_VAEMerge{action}",
+                display_name=label,
+                category="advanced/model_merging",
+                description=f"vae1 {'+' if sign > 0 else '-'} multiplier * vae2, for every float tensor.",
+                inputs=[
+                    io.Vae.Input("vae1"),
+                    io.Vae.Input("vae2"),
+                    io.Float.Input("multiplier", default=0.0, min=-10.0, max=10.0, step=0.01),
+                ],
+                outputs=[io.Vae.Output()],
+            )
 
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_VAEMergeSubtract",
-            display_name="VAE Merge Subtract",
-            category="advanced/model_merging",
-            inputs=[
-                io.Vae.Input("vae1"),
-                io.Vae.Input("vae2"),
-                io.Float.Input("multiplier", default=1.0, min=-10.0, max=10.0, step=0.01),
-            ],
-            outputs=single_output(io.Vae),
-        )
+        @classmethod
+        def execute(cls, vae1, vae2, multiplier: float) -> io.NodeOutput:
+            factor = sign * multiplier
+            return io.NodeOutput(_combine_vae(
+                vae1, vae2, lambda key, a, b: (a.float() + factor * b.float()).to(a.dtype), label))
 
-    @classmethod
-    def execute(cls, vae1, vae2, multiplier: float) -> io.NodeOutput:
-        sd1, sd2 = vae1.get_sd(), vae2.get_sd()
-        merged_sd = {
-            key: (tensor - multiplier * sd2[key]) if key in sd2 else tensor
-            for key, tensor in sd1.items()
-        }
-        return io.NodeOutput(comfy.sd.VAE(sd=merged_sd))
-
-
-# ------------------------------------------------------------------------------
-# Node: VAE Merge Add
-# ------------------------------------------------------------------------------
-
-class VAEMergeAdd(io.ComfyNode):
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_VAEMergeAdd",
-            display_name="VAE Merge Add",
-            category="advanced/model_merging",
-            inputs=[
-                io.Vae.Input("vae1"),
-                io.Vae.Input("vae2"),
-            ],
-            outputs=single_output(io.Vae),
-        )
-
-    @classmethod
-    def execute(cls, vae1, vae2) -> io.NodeOutput:
-        sd1, sd2 = vae1.get_sd(), vae2.get_sd()
-        merged_sd = {
-            key: (tensor + sd2[key]) if key in sd2 else tensor
-            for key, tensor in sd1.items()
-        }
-        return io.NodeOutput(comfy.sd.VAE(sd=merged_sd))
+    _ArithNode.__name__ = _ArithNode.__qualname__ = f"VAEMerge{action}"
+    return _ArithNode
 
 
-# ------------------------------------------------------------------------------
-# Node: VAE Scale SDXL Block
-# ------------------------------------------------------------------------------
-
-class VAEScaleSDXLBlock(io.ComfyNode):
-    """Scale SDXL VAE layers. scale=1.0 keeps original, scale=0.0 zeroes out.
-
-    get_sd() returns ComfyUI's internal ldm-style keys:
-      encoder.down_blocks.N.resnets.M.* -> encoder.down.N.block.M.*
-      encoder.mid_block.resnets.{0,1}.* -> encoder.mid.block_{1,2}.*
-      encoder.mid_block.attentions.0.*  -> encoder.mid.attn_1.*
-      (decoder mirrors the same remapping)
-    """
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_VAEScaleSDXLBlock",
-            display_name="VAE Scale SDXL Block",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of SDXL VAE. "
-                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_VAE_SDXL_LAYER_KEYS, "vae", io.Vae),
-            outputs=single_output(io.Vae),
-        )
-
-    @classmethod
-    def execute(cls, vae, **kwargs) -> io.NodeOutput:
-        ratios = restore_layer_keys(kwargs, _VAE_SDXL_LAYER_KEYS)
-        return io.NodeOutput(scale_vae_sd(vae, ratios))
+VAEMergeAdd = _make_vae_arith_node("Add", +1.0)
+VAEMergeSubtract = _make_vae_arith_node("Subtract", -1.0)
 
 
-# ------------------------------------------------------------------------------
-# Node: VAE Merge SDXL Block
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# 6. Extension entry
+# ==============================================================================
 
-class VAEMergeSDXLBlock(io.ComfyNode):
-    """Block-wise merge for two SDXL VAEs. ratio=0.0 keeps vae1, ratio=1.0 uses vae2."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_VAEMergeSDXLBlock",
-            display_name="VAE Merge SDXL Block",
-            category="advanced/model_merging/model_specific",
-            description="Block-wise merging for SDXL VAE. Ratio=0.0 keeps vae1, Ratio=1.0 uses vae2.",
-            inputs=[
-                io.Vae.Input("vae1"),
-                io.Vae.Input("vae2"),
-                *[io.Float.Input(key, default=0.5, min=0.0, max=1.0, step=0.01)
-                  for key in _VAE_SDXL_LAYER_KEYS],
-            ],
-            outputs=single_output(io.Vae),
-        )
-
-    @classmethod
-    def execute(cls, vae1, vae2, **kwargs) -> io.NodeOutput:
-        ratios = restore_layer_keys(kwargs, _VAE_SDXL_LAYER_KEYS)
-        return io.NodeOutput(merge_vae_sd(vae1, vae2, ratios))
-
-
-# ------------------------------------------------------------------------------
-# Node: VAE Scale FLUX Block
-# ------------------------------------------------------------------------------
-
-class VAEScaleFluxBlock(io.ComfyNode):
-    """Scale FLUX1 VAE layers. FLUX1's get_sd() already uses ldm-style keys directly."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_VAEScaleFluxBlock",
-            display_name="VAE Scale FLUX Block",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of FLUX1 VAE. "
-                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_VAE_FLUX_LAYER_KEYS, "vae", io.Vae),
-            outputs=single_output(io.Vae),
-        )
-
-    @classmethod
-    def execute(cls, vae, **kwargs) -> io.NodeOutput:
-        ratios = restore_layer_keys(kwargs, _VAE_FLUX_LAYER_KEYS)
-        return io.NodeOutput(scale_vae_sd(vae, ratios))
-
-
-# ------------------------------------------------------------------------------
-# Node: VAE Scale FLUX2 Block
-# ------------------------------------------------------------------------------
-
-class VAEScaleFlux2Block(io.ComfyNode):
-    """Scale FLUX2 VAE layers. Integer/bool tensors (e.g. buffer counters) are left untouched."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_VAEScaleFlux2Block",
-            display_name="VAE Scale FLUX2 Block",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of FLUX2 VAE. "
-                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_VAE_FLUX2_LAYER_KEYS, "vae", io.Vae),
-            outputs=single_output(io.Vae),
-        )
-
-    @classmethod
-    def execute(cls, vae, **kwargs) -> io.NodeOutput:
-        ratios = restore_layer_keys(kwargs, _VAE_FLUX2_LAYER_KEYS)
-        return io.NodeOutput(scale_vae_sd(vae, ratios, skip_dtypes=_VAE_FLUX2_SKIP_DTYPES))
-
-
-# ------------------------------------------------------------------------------
-# Node: VAE Scale Qwen Block
-# ------------------------------------------------------------------------------
-
-class VAEScaleQwenBlock(io.ComfyNode):
-    """Scale Qwen-Image VAE layers."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_VAEScaleQwenBlock",
-            display_name="VAE Scale Qwen Block",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of the Qwen-Image VAE. "
-                        "Scale=1.0 keeps original, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_VAE_QWEN_LAYER_KEYS, "vae", io.Vae),
-            outputs=single_output(io.Vae),
-        )
-
-    @classmethod
-    def execute(cls, vae, **kwargs) -> io.NodeOutput:
-        ratios = restore_layer_keys(kwargs, _VAE_QWEN_LAYER_KEYS)
-        return io.NodeOutput(scale_vae_sd(vae, ratios))
-
-
-# ------------------------------------------------------------------------------
-# Node: VAE Scale Wan Video
-# ------------------------------------------------------------------------------
-
-class VAEScaleWanVideoBlock(io.ComfyNode):
-    """Scale Wan2.1 VAE layers."""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EasygoingNodes_VAEScaleWanVideo",
-            display_name="VAE Scale Wan Video",
-            category="advanced/model_merging/model_specific",
-            description="Scale specific layers of the Wan2.1 VAE. "
-                        "Scale=1.0 keeps original weights, Scale=0.0 zeroes out the layer.",
-            inputs=build_scale_inputs(_VAE_WAN_VIDEO_LAYER_KEYS, "vae", io.Vae),
-            outputs=single_output(io.Vae),
-        )
-
-    @classmethod
-    def execute(cls, vae, **kwargs) -> io.NodeOutput:
-        ratios = restore_layer_keys(kwargs, _VAE_WAN_VIDEO_LAYER_KEYS)
-        return io.NodeOutput(scale_vae_sd(vae, ratios))
-
-
-# ------------------------------------------------------------------------------
-# Extension registration
-# ------------------------------------------------------------------------------
-
-NODE_LIST = [
+NODE_LIST: list[type[io.ComfyNode]] = [
     KeyNameInspector,
-    ModelScaleSDXL,
-    ModelMergeHiDream,
-    ModelScaleHiDream,
-    ModelScaleQwenImage,
-    ModelScaleQwenImage2_1,
-    ModelMergeZImage,
-    ModelScaleZImage,
-    ModelScaleKrea2,
-    ModelScaleFlux2Klein,
-    ModelScaleErnieImage,
-    ModelScaleMossImage,
-    ModelScaleHiDreamO1Image,
-    ModelMergeHiDreamO1Image,
-    CLIPScaleDualSDXLBlock,
-    CLIPScaleQwenBlock,
+    *_build_block_nodes(),
     CLIPSaveQwen,
     VAEMergeSimple,
-    VAEMergeSubtract,
     VAEMergeAdd,
-    VAEScaleSDXLBlock,
-    VAEMergeSDXLBlock,
-    VAEScaleFluxBlock,
-    VAEScaleFlux2Block,
-    VAEScaleQwenBlock,
-    VAEScaleWanVideoBlock,
+    VAEMergeSubtract,
 ]
 
 
