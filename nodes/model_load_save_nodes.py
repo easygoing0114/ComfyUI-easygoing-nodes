@@ -3,6 +3,8 @@ import os
 
 import torch
 import comfy.sd
+import comfy.lora
+import comfy.model_management
 import folder_paths
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
@@ -153,7 +155,7 @@ class LoadDiffusionModelWithName(io.ComfyNode):
 # ------------------------------------------------------------------------------
 # Load Original Model / Model Save with Original
 #
-# Solves two problems that arise when editing and re-saving a ComfyUI model:
+# Solves three problems that arise when editing and re-saving a ComfyUI model:
 #
 #   1. Key prefix mismatch — ComfyUI may prepend an internal prefix (e.g.
 #      "diffusion_model.") to state_dict keys, so they no longer match the
@@ -165,6 +167,12 @@ class LoadDiffusionModelWithName(io.ComfyNode):
 #      actually used, so some may be dropped on save. Resolved by keeping
 #      the full original tensor set and filling in whatever is missing
 #      from ComfyUI's state_dict at save time.
+#
+#   3. Un-applied patches — merge / scale / LoRA nodes do not rewrite weights;
+#      they only register patches on the ModelPatcher (model.patches).
+#      model.model.state_dict() therefore returns the *unpatched* weights.
+#      Resolved by explicitly computing the patched weights (_bake_patches)
+#      before saving.
 # ------------------------------------------------------------------------------
 
 ORIGINAL_MODEL_TYPE = io.Custom("ORIGINAL_MODEL")
@@ -231,6 +239,57 @@ def _find_best_prefix_pair(
     )
 
     return best_orig_pfx, best_comfy_pfx, get_orig(best_orig_pfx), get_comfy(best_comfy_pfx)
+
+
+def _bake_patches(model, comfy_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Return a copy of `comfy_sd` in which every key that has patches registered on
+    the ModelPatcher (merge / scale / LoRA ...) holds the *patched* weight.
+
+    - Base weight: model.backup[key].weight if the model is currently loaded with the
+      patches already baked in (backup holds the pre-patch weight); otherwise the
+      state_dict tensor, which is the unpatched weight.
+    - Patches are evaluated in float32 via comfy.lora.calculate_weight (it handles
+      nested patches, e.g. a Scale node stacked on top of a Merge node), then cast
+      back to the base dtype.
+    - The model itself is not modified.
+    """
+    patches = getattr(model, "patches", None)
+    if not patches:
+        print("[ModelSaveWithOriginal] WARNING: model has no patches registered; "
+              "saving the raw weights as they are.")
+        return dict(comfy_sd)
+
+    backup = getattr(model, "backup", None) or {}
+    device = comfy.model_management.get_torch_device()
+
+    out = dict(comfy_sd)
+    baked = 0
+    not_in_sd: list[str] = []
+    for key, patch_list in patches.items():
+        if key not in out:
+            not_in_sd.append(key)
+            continue
+
+        bk = backup.get(key)
+        base = bk.weight if (bk is not None and hasattr(bk, "weight")) else out[key]
+        if base.device.type == "meta":
+            raise RuntimeError(
+                f"Weight '{key}' is on the meta device, so the base weight cannot be read. "
+                "The model is not fully materialized (dynamic VRAM / offloading?). "
+                "Try restarting ComfyUI with --disable-dynamic-vram."
+            )
+
+        base_dtype = base.dtype
+        w = base.detach().to(device=device, dtype=torch.float32)
+        w = comfy.lora.calculate_weight(patch_list, w, key)
+        out[key] = w.to(device="cpu", dtype=base_dtype).contiguous()
+        baked += 1
+
+    print(f"[ModelSaveWithOriginal] baked patches into {baked} tensors "
+          f"(patch keys: {len(patches)}, not found in state_dict: {len(not_in_sd)})")
+    if not_in_sd:
+        print("[ModelSaveWithOriginal] patch keys not in state_dict, e.g. " + ", ".join(not_in_sd[:5]))
+    return out
 
 
 # ------------------------------------------------------------------------------
@@ -309,9 +368,10 @@ class LoadOriginalModel(io.ComfyNode):
 class ModelSaveWithOriginal(io.ComfyNode):
     """Merges an edited ComfyUI MODEL with its original_model and saves as safetensors.
 
-    Flow: match keys between the two state_dicts via prefix search, take the
-    ComfyUI (edited) value for matched tensors, restore missing tensors from
-    the original, and save under the original file's key names.
+    Flow: take the ComfyUI state_dict, bake every registered patch (merge / scale /
+    LoRA) into it, match keys against the original via prefix search, take the
+    patched value for matched tensors, restore missing tensors from the original,
+    and save under the original file's key names.
     """
 
     @classmethod
@@ -352,6 +412,10 @@ class ModelSaveWithOriginal(io.ComfyNode):
                     "Check that LoadOriginalModel is connected to ModelSaveWithOriginal."
                 )
 
+        # NOTE: state_dict() holds the UNPATCHED weights. Merge / scale / LoRA nodes only
+        # register patches on the ModelPatcher, so they must be applied explicitly here.
+        comfy_sd = _bake_patches(model, comfy_sd)
+
         orig_keys = list(orig_tensors.keys())
         comfy_keys = list(comfy_sd.keys())
         _, _, orig_norm_map, comfy_norm_map = _find_best_prefix_pair(orig_keys, comfy_keys)
@@ -366,7 +430,12 @@ class ModelSaveWithOriginal(io.ComfyNode):
         restored = 0
         for norm_key, orig_key in orig_norm_map.items():
             if norm_key in comfy_norm_tensors:
-                output_sd[orig_key] = comfy_norm_tensors[norm_key].to(orig_tensors[orig_key].dtype)
+                output_sd[orig_key] = (
+                    comfy_norm_tensors[norm_key]
+                    .detach()
+                    .to(device="cpu", dtype=orig_tensors[orig_key].dtype)
+                    .contiguous()
+                )
                 matched += 1
             else:
                 output_sd[orig_key] = orig_tensors[orig_key]
