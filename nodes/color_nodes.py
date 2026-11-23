@@ -84,7 +84,7 @@ def rgb_to_lab(rgb_u8: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     a = np.float32(500.0) * (fx - fy)
     b_ch = np.float32(200.0) * (fy - fz)
 
-    L_u8 = np.clip(L * (255.0 / 100.0), 0, 255).astype(np.uint8)
+    L_u8 = np.clip(np.rint(L * (255.0 / 100.0)), 0, 255).astype(np.uint8)
     return L_u8, a.astype(np.float32), b_ch.astype(np.float32)
 
 
@@ -105,7 +105,7 @@ def lab_to_rgb(L_u8: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
     rgb_lin = np.stack([r_lin, g_lin, b_lin], axis=-1)
     rgb = _linear_to_srgb(rgb_lin)
-    return np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
+    return np.clip(np.rint(rgb * 255.0), 0, 255).astype(np.uint8)
 
 
 def tensor2pil(image: torch.Tensor) -> Image.Image:
@@ -175,11 +175,28 @@ def apply_gamma_correction(lum_array: np.ndarray, gamma: float) -> np.ndarray:
     return np.clip(adjusted, 0, 255).astype(np.uint8)
 
 
-def apply_midtone_weight(values: np.ndarray, adjustment_strength: float) -> np.ndarray:
-    normalized = np.clip((values + 128.0) / 255.0, 0.0, 1.0)
-    midtone_weight = 4.0 * normalized * (1.0 - normalized)
-    adjustment = adjustment_strength * midtone_weight
-    return (values * (1.0 + adjustment)).astype(np.float32)
+# adjustment = ±1.0 のときに a/b 軸を動かす量 (LAB 単位)。
+# 大きくするとスライダーの効きが強くなる。
+_AB_SHIFT_RANGE = 50.0
+
+
+def apply_midtone_weight(
+    values: np.ndarray,
+    luminance_u8: np.ndarray,
+    adjustment: float,
+) -> np.ndarray:
+    """a/b チャネルを軸方向に平行移動する。
+
+    adjustment > 0 : a なら赤方向 / b なら黄方向へ
+    adjustment < 0 : a なら緑方向 / b なら青方向へ
+
+    シフト量は明度 L による山型の重み (中間調で最大、黒・白で 0) をかけるので、
+    シャドウとハイライトは色がつきにくい。
+    """
+    t = luminance_u8.astype(np.float32) / 255.0
+    midtone_weight = 4.0 * t * (1.0 - t)
+    shift = np.float32(adjustment * _AB_SHIFT_RANGE) * midtone_weight
+    return (values + shift).astype(np.float32)
 
 
 def blend_ab_channels(
@@ -215,9 +232,9 @@ def process_one_image(
     adjusted_a = a.copy()
     adjusted_b = b.copy()
     if a_adjustment != 0.0:
-        adjusted_a = apply_midtone_weight(adjusted_a, a_adjustment)
+        adjusted_a = apply_midtone_weight(adjusted_a, L_u8, a_adjustment)
     if b_adjustment != 0.0:
-        adjusted_b = apply_midtone_weight(adjusted_b, b_adjustment)
+        adjusted_b = apply_midtone_weight(adjusted_b, L_u8, b_adjustment)
 
     a_final, b_final = blend_ab_channels(a, b, adjusted_a, adjusted_b, ab_strength)
 
@@ -311,7 +328,8 @@ class HDREffectsLabAdjust(io.ComfyNode):
                     min=-1.0,
                     max=1.0,
                     step=0.01,
-                    tooltip="Midtone-weighted adjustment of the LAB A channel (green-red).",
+                    tooltip="Shift the LAB A axis in the midtones. "
+                    "Positive = toward red, negative = toward green.",
                 ),
                 io.Float.Input(
                     "b_adjustment",
@@ -319,7 +337,8 @@ class HDREffectsLabAdjust(io.ComfyNode):
                     min=-1.0,
                     max=1.0,
                     step=0.01,
-                    tooltip="Midtone-weighted adjustment of the LAB B channel (blue-yellow).",
+                    tooltip="Shift the LAB B axis in the midtones. "
+                    "Positive = toward yellow, negative = toward blue.",
                 ),
                 io.Float.Input(
                     "contrast",
