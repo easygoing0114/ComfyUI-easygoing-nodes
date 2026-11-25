@@ -155,7 +155,7 @@ class LoadDiffusionModelWithName(io.ComfyNode):
 # ------------------------------------------------------------------------------
 # Load Original Model / Model Save with Original
 #
-# Solves three problems that arise when editing and re-saving a ComfyUI model:
+# Solves four problems that arise when editing and re-saving a ComfyUI model:
 #
 #   1. Key prefix mismatch — ComfyUI may prepend an internal prefix (e.g.
 #      "diffusion_model.") to state_dict keys, so they no longer match the
@@ -173,9 +173,22 @@ class LoadDiffusionModelWithName(io.ComfyNode):
 #      model.model.state_dict() therefore returns the *unpatched* weights.
 #      Resolved by explicitly computing the patched weights (_bake_patches)
 #      before saving.
+#
+#   4. Format conversion on load — when the source file is in diffusers format,
+#      ComfyUI converts it while loading (e.g. separate to_q / to_k / to_v are
+#      fused into a single qkv tensor, other tensors are renamed). Those fused /
+#      renamed tensors do not match any original key. Resolved by value matching
+#      (_find_split_groups): the *unpatched* ComfyUI tensor is compared with the
+#      unmatched original tensors to find which originals it was built from
+#      (concatenation along dim 0), then the *patched* tensor is split back into
+#      the original tensors, so the output keeps the original layout.
 # ------------------------------------------------------------------------------
 
 ORIGINAL_MODEL_TYPE = io.Custom("ORIGINAL_MODEL")
+
+# Upper bounds for the value-matching search in _find_split_groups.
+_MAX_PIECES = 8           # max number of original tensors fused into one ComfyUI tensor
+_MAX_SEARCH_STEPS = 5000  # max candidate checks per ComfyUI tensor
 
 
 def _collect_prefix_candidates(keys: list[str]) -> list[str]:
@@ -241,9 +254,17 @@ def _find_best_prefix_pair(
     return best_orig_pfx, best_comfy_pfx, get_orig(best_orig_pfx), get_comfy(best_comfy_pfx)
 
 
-def _bake_patches(model, comfy_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Return a copy of `comfy_sd` in which every key that has patches registered on
-    the ModelPatcher (merge / scale / LoRA ...) holds the *patched* weight.
+def _bake_patches(
+    model,
+    comfy_sd: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], set[str]]:
+    """Return (baked_sd, base_weights, patched_keys).
+
+    baked_sd:     a copy of `comfy_sd` in which every key that has patches registered on
+                  the ModelPatcher (merge / scale / LoRA ...) holds the *patched* weight.
+    base_weights: {key: unpatched weight} for the keys that were baked. Used later to
+                  identify which original tensors a fused ComfyUI tensor was built from.
+    patched_keys: set of keys that were baked.
 
     - Base weight: model.backup[key].weight if the model is currently loaded with the
       patches already baked in (backup holds the pre-patch weight); otherwise the
@@ -257,12 +278,13 @@ def _bake_patches(model, comfy_sd: dict[str, torch.Tensor]) -> dict[str, torch.T
     if not patches:
         print("[ModelSaveWithOriginal] WARNING: model has no patches registered; "
               "saving the raw weights as they are.")
-        return dict(comfy_sd)
+        return dict(comfy_sd), {}, set()
 
     backup = getattr(model, "backup", None) or {}
     device = comfy.model_management.get_torch_device()
 
     out = dict(comfy_sd)
+    bases: dict[str, torch.Tensor] = {}
     baked = 0
     not_in_sd: list[str] = []
     for key, patch_list in patches.items():
@@ -283,13 +305,128 @@ def _bake_patches(model, comfy_sd: dict[str, torch.Tensor]) -> dict[str, torch.T
         w = base.detach().to(device=device, dtype=torch.float32)
         w = comfy.lora.calculate_weight(patch_list, w, key)
         out[key] = w.to(device="cpu", dtype=base_dtype).contiguous()
+        bases[key] = base
         baked += 1
 
     print(f"[ModelSaveWithOriginal] baked patches into {baked} tensors "
           f"(patch keys: {len(patches)}, not found in state_dict: {len(not_in_sd)})")
     if not_in_sd:
         print("[ModelSaveWithOriginal] patch keys not in state_dict, e.g. " + ", ".join(not_in_sd[:5]))
-    return out
+    return out, bases, set(bases.keys())
+
+
+# ------------------------------------------------------------------------------
+# Splitting fused / renamed tensors back into the original layout
+# ------------------------------------------------------------------------------
+
+def _natural_digits(key: str) -> tuple[int, ...]:
+    """All integers appearing in a key, in order (layer indices etc.)."""
+    return tuple(int(x) for x in re.findall(r"\d+", key))
+
+
+def _common_prefix_len(a: tuple, b: tuple) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def _tensor_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Exact equality after casting `b` to `a`'s dtype (reproduces the dtype conversion
+    ComfyUI applied when loading), compared in float32 so fp8 tensors work on CPU."""
+    if a.shape != b.shape:
+        return False
+    return torch.equal(a.float(), b.to(a.dtype).float())
+
+
+def _find_split_groups(
+    orig_only_norms: list[str],
+    comfy_only_norms: list[str],
+    orig_norm_map: dict[str, str],
+    comfy_norm_map: dict[str, str],
+    orig_tensors: dict[str, torch.Tensor],
+    comfy_sd: dict[str, torch.Tensor],
+    base_weights: dict[str, torch.Tensor],
+) -> dict[str, list[tuple[str, int, int]]]:
+    """For every ComfyUI tensor that has no same-named original, find the original
+    tensors it was built from.
+
+    A ComfyUI tensor B (unpatched) is explained if B == concat(O1, O2, ...) along dim 0,
+    where each Oi is an original tensor that has no match by name. This covers both
+    fused tensors (to_q + to_k + to_v -> qkv) and pure renames (a group of one).
+    Matching is by value, so no model-specific key mapping is needed.
+
+    Returns:
+        {comfy_norm_key: [(orig_norm_key, start_row, n_rows), ...]}
+    """
+    # Candidate originals, grouped by (last key component, ndim, trailing shape).
+    pool: dict[tuple, list[str]] = {}
+    for n in sorted(orig_only_norms):
+        t = orig_tensors[orig_norm_map[n]]
+        if t.ndim == 0 or t.shape[0] == 0:
+            continue
+        sig = (n.rsplit(".", 1)[-1], t.ndim, tuple(t.shape[1:]))
+        pool.setdefault(sig, []).append(n)
+
+    used: set[str] = set()
+    result: dict[str, list[tuple[str, int, int]]] = {}
+
+    for cn in sorted(comfy_only_norms):
+        ck = comfy_norm_map[cn]
+        base = base_weights.get(ck, comfy_sd[ck])
+        if base.ndim == 0 or base.shape[0] == 0 or base.device.type == "meta":
+            continue
+
+        sig = (cn.rsplit(".", 1)[-1], base.ndim, tuple(base.shape[1:]))
+        cands = [n for n in pool.get(sig, []) if n not in used]
+        if not cands:
+            continue
+
+        # Prefer candidates whose layer indices agree with the ComfyUI key
+        # (only matters when several candidates have identical values, e.g. zero biases).
+        cn_digits = _natural_digits(cn)
+        cands.sort(key=lambda n: -_common_prefix_len(cn_digits, _natural_digits(n)))
+
+        bc = base.detach().to("cpu")
+        total = bc.shape[0]
+        steps = [0]
+
+        def dfs(offset: int, chosen: list[tuple[str, int, int]]):
+            if offset == total:
+                return list(chosen)
+            if len(chosen) >= _MAX_PIECES:
+                return None
+            taken = {c[0] for c in chosen}
+            for n in cands:
+                if n in taken:
+                    continue
+                o = orig_tensors[orig_norm_map[n]]
+                ln = o.shape[0]
+                if offset + ln > total:
+                    continue
+                steps[0] += 1
+                if steps[0] > _MAX_SEARCH_STEPS:
+                    return None
+                # Cheap first-row check, then the full slice.
+                if not _tensor_equal(bc[offset], o[0]):
+                    continue
+                if not _tensor_equal(bc[offset:offset + ln], o):
+                    continue
+                chosen.append((n, offset, ln))
+                found = dfs(offset + ln, chosen)
+                if found is not None:
+                    return found
+                chosen.pop()
+            return None
+
+        pieces = dfs(0, [])
+        if pieces:
+            result[cn] = pieces
+            used.update(p[0] for p in pieces)
+
+    return result
 
 
 # ------------------------------------------------------------------------------
@@ -370,8 +507,9 @@ class ModelSaveWithOriginal(io.ComfyNode):
 
     Flow: take the ComfyUI state_dict, bake every registered patch (merge / scale /
     LoRA) into it, match keys against the original via prefix search, take the
-    patched value for matched tensors, restore missing tensors from the original,
-    and save under the original file's key names.
+    patched value for matched tensors, split fused / renamed ComfyUI tensors back
+    into the original tensors (e.g. qkv -> to_q / to_k / to_v), restore anything
+    still missing from the original, and save under the original file's key names.
     """
 
     @classmethod
@@ -414,7 +552,7 @@ class ModelSaveWithOriginal(io.ComfyNode):
 
         # NOTE: state_dict() holds the UNPATCHED weights. Merge / scale / LoRA nodes only
         # register patches on the ModelPatcher, so they must be applied explicitly here.
-        comfy_sd = _bake_patches(model, comfy_sd)
+        comfy_sd, base_weights, patched_keys = _bake_patches(model, comfy_sd)
 
         orig_keys = list(orig_tensors.keys())
         comfy_keys = list(comfy_sd.keys())
@@ -424,33 +562,88 @@ class ModelSaveWithOriginal(io.ComfyNode):
             norm_k: comfy_sd[orig_k] for norm_k, orig_k in comfy_norm_map.items()
         }
 
-        # Merge: matched tensors take the edited value, missing ones are restored.
+        # Tensors that exist on only one side: for a diffusers-format source these are the
+        # separate to_q / to_k / to_v (original) vs the fused qkv (ComfyUI), renamed layers, etc.
+        orig_only_norms = [n for n in orig_norm_map if n not in comfy_norm_map]
+        comfy_only_norms = [n for n in comfy_norm_map if n not in orig_norm_map]
+
+        split_groups = _find_split_groups(
+            orig_only_norms,
+            comfy_only_norms,
+            orig_norm_map,
+            comfy_norm_map,
+            orig_tensors,
+            comfy_sd,
+            base_weights,
+        )
+        # orig_norm_key -> (comfy_key, start_row, n_rows)
+        split_lookup: dict[str, tuple[str, int, int]] = {}
+        for cn, pieces in split_groups.items():
+            for on, start, ln in pieces:
+                split_lookup[on] = (comfy_norm_map[cn], start, ln)
+
+        # Merge: matched tensors take the edited value, split tensors are cut out of the
+        # fused ComfyUI tensor, anything else is restored from the original.
         output_sd: dict[str, torch.Tensor] = {}
         matched = 0
+        split = 0
         restored = 0
+        restored_keys: list[str] = []
         for norm_key, orig_key in orig_norm_map.items():
+            orig_t = orig_tensors[orig_key]
             if norm_key in comfy_norm_tensors:
                 output_sd[orig_key] = (
                     comfy_norm_tensors[norm_key]
                     .detach()
-                    .to(device="cpu", dtype=orig_tensors[orig_key].dtype)
+                    .to(device="cpu", dtype=orig_t.dtype)
                     .contiguous()
                 )
                 matched += 1
+            elif norm_key in split_lookup:
+                comfy_key, start, n_rows = split_lookup[norm_key]
+                if comfy_key in patched_keys:
+                    output_sd[orig_key] = (
+                        comfy_sd[comfy_key][start:start + n_rows]
+                        .detach()
+                        .to(device="cpu", dtype=orig_t.dtype)
+                        .clone()
+                        .contiguous()
+                    )
+                else:
+                    # Not patched: the value is identical to the original, so keep the
+                    # original tensor as is (lossless, no dtype round trip).
+                    output_sd[orig_key] = orig_t
+                split += 1
             else:
-                output_sd[orig_key] = orig_tensors[orig_key]
+                output_sd[orig_key] = orig_t
                 restored += 1
+                restored_keys.append(orig_key)
 
-        comfy_only = set(comfy_norm_map.keys()) - set(orig_norm_map.keys())
-        print(
-            f"[ModelSaveWithOriginal] matched={matched}, restored={restored}, "
-            f"comfy_only(skipped)={len(comfy_only)}"
+        unresolved_comfy = (
+            set(comfy_norm_map.keys()) - set(orig_norm_map.keys()) - set(split_groups.keys())
         )
-        if comfy_only:
+        print(
+            f"[ModelSaveWithOriginal] matched={matched}, split={split} "
+            f"(from {len(split_groups)} fused/renamed comfy tensors), restored={restored}, "
+            f"comfy_only(skipped)={len(unresolved_comfy)}"
+        )
+        if split_groups:
+            for cn in sorted(split_groups)[:5]:
+                parts = ", ".join(p[0] for p in split_groups[cn])
+                print(f"[ModelSaveWithOriginal]   split: {cn} -> {parts}")
+            if len(split_groups) > 5:
+                print(f"[ModelSaveWithOriginal]   ... and {len(split_groups) - 5} more")
+        if restored_keys:
+            print(
+                "[ModelSaveWithOriginal] restored from original (edits NOT applied), e.g. "
+                + ", ".join(restored_keys[:10])
+                + ("..." if len(restored_keys) > 10 else "")
+            )
+        if unresolved_comfy:
             print(
                 "[ModelSaveWithOriginal] comfy_only keys (skipped): "
-                + ", ".join(sorted(comfy_only)[:10])
-                + ("..." if len(comfy_only) > 10 else "")
+                + ", ".join(sorted(unresolved_comfy)[:10])
+                + ("..." if len(unresolved_comfy) > 10 else "")
             )
 
         # Resolve output path, avoiding collisions via a numeric suffix.
@@ -474,13 +667,14 @@ class ModelSaveWithOriginal(io.ComfyNode):
             save_meta["restored_by"] = "ModelSaveWithOriginal"
             save_meta["restored_tensors"] = str(restored)
             save_meta["matched_tensors"] = str(matched)
+            save_meta["split_tensors"] = str(split)
 
         save_file(output_sd, full_path, metadata=save_meta)
 
         print(f"[ModelSaveWithOriginal] saved: {full_path}")
         print(
             f"  total tensors: {len(output_sd)} "
-            f"(orig: {len(orig_tensors)}, matched: {matched}, restored: {restored})"
+            f"(orig: {len(orig_tensors)}, matched: {matched}, split: {split}, restored: {restored})"
         )
 
         return io.NodeOutput()
